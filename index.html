@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="현장사진">
+<meta name="theme-color" content="#111111">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>현장 사진</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <main id="screens">
+
+    <!-- 촬영 -->
+    <section id="scr-camera" class="screen dark" data-tab="camera">
+      <video id="camVideo" playsinline muted autoplay></video>
+      <div class="cam-top">
+        <button id="camFloor" class="chip dark-chip">층 선택</button>
+        <div id="camLens" class="lens"></div>
+      </div>
+      <div id="camBanner" class="cam-banner" hidden></div>
+      <div id="camStart" class="cam-start" hidden>
+        <p id="camStartMsg">카메라를 켜려면 아래 버튼을 눌러 주세요.</p>
+        <button id="camStartBtn" class="btn primary big">카메라 켜기</button>
+      </div>
+      <div class="cam-bottom">
+        <button id="camLast" class="cam-last" aria-label="마지막 사진"></button>
+        <button id="camShutter" class="shutter" aria-label="촬영"><span></span></button>
+        <div class="cam-side">
+          <button id="camNative" class="side-btn">기본<br>카메라</button>
+          <button id="camVideoBtn" class="side-btn">영상</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 도면 -->
+    <section id="scr-plan" class="screen" data-tab="plan">
+      <header class="bar"><div id="pFloors" class="floors"></div></header>
+      <div id="pHost" class="plan-host"></div>
+      <div class="legend"><span class="lg photo">사진 있는 부재</span><span class="lg open">미조치 이슈</span><span class="lg pin">부재 없음 사진</span><label class="lg-toggle"><input type="checkbox" id="pRooms"> 실 구역</label></div>
+      <div id="pSheet" class="bottom-sheet" hidden>
+        <div class="bs-head"><div id="pSheetTitle"></div><button id="pSheetClose" class="icon-btn" aria-label="닫기">✕</button></div>
+        <div id="pSheetList" class="thumbs-row"></div>
+      </div>
+    </section>
+
+    <!-- 날짜 -->
+    <section id="scr-days" class="screen" data-tab="days">
+      <header class="bar">
+        <button id="dPrev" class="icon-btn" aria-label="이전 날">‹</button>
+        <button id="dTitle" class="bar-title"></button>
+        <button id="dNext" class="icon-btn" aria-label="다음 날">›</button>
+        <span class="spacer"></span>
+        <button id="dSelect" class="btn small">선택</button>
+      </header>
+      <div class="scroll">
+        <div id="backupBanner" class="banner" hidden></div>
+        <div id="tbmCard" class="card tbm"></div>
+        <div id="dGrid" class="grid"></div>
+        <p id="dEmpty" class="empty" hidden>이날 찍은 사진이 없어요.</p>
+        <div class="d-more"><button id="dAlbum" class="btn small">+ 앨범에서 가져오기</button></div>
+      </div>
+      <div id="dSelBar" class="sel-bar" hidden>
+        <span id="dSelCount"></span>
+        <button id="dSelAll" class="btn small">전체</button>
+        <button id="dSelMemo" class="btn small">메모</button>
+        <button id="dSelExport" class="btn small">내보내기</button>
+        <button id="dSelDelete" class="btn small danger">삭제</button>
+      </div>
+    </section>
+
+    <!-- 이슈 -->
+    <section id="scr-issues" class="screen" data-tab="issues">
+      <header class="bar">
+        <h2>이슈</h2><span class="spacer"></span>
+        <div class="seg" id="iFilter">
+          <button data-f="open" aria-pressed="true">미조치</button>
+          <button data-f="done" aria-pressed="false">조치완료</button>
+          <button data-f="all" aria-pressed="false">전체</button>
+        </div>
+      </header>
+      <div class="scroll"><div id="iList" class="list"></div><p id="iEmpty" class="empty" hidden>해당하는 이슈가 없어요.</p></div>
+    </section>
+
+    <!-- 더보기 -->
+    <section id="scr-more" class="screen" data-tab="more">
+      <header class="bar"><h2>더보기</h2></header>
+      <div class="scroll" id="moreBody"></div>
+    </section>
+  </main>
+
+  <nav id="tabs">
+    <button data-tab="camera"><i>◉</i>촬영</button>
+    <button data-tab="plan"><i>▦</i>도면</button>
+    <button data-tab="days"><i>▤</i>날짜</button>
+    <button data-tab="issues"><i>!</i>이슈<b id="issueBadge" hidden></b></button>
+    <button data-tab="more"><i>⋯</i>더보기</button>
+  </nav>
+</div>
+
+<!-- 촬영 후 위치 고르기 -->
+<div id="sheet" class="overlay sheet" hidden>
+  <div class="sh-top">
+    <button id="shClose" class="icon-btn" aria-label="사진 버리기">✕</button>
+    <button id="shFloor" class="chip">층</button>
+    <div class="seg" id="shMode">
+      <button id="shMem" aria-pressed="true">부재</button>
+      <button id="shNoMem" aria-pressed="false">부재 없음</button>
+    </div>
+    <button id="shIssue" class="tgl" aria-pressed="false">이슈</button>
+  </div>
+  <div id="shHint" class="sh-hint"></div>
+  <div id="shPlan" class="plan-host"></div>
+  <div id="shInfo" class="sh-info"></div>
+  <div class="sh-bottom">
+    <button id="shLater" class="btn">나중에</button>
+    <button id="shMove" class="btn">핀 옮기기</button>
+    <button id="shMemo" class="btn">메모</button>
+    <button id="shSave" class="btn primary">저장</button>
+  </div>
+  <img id="shThumb" class="sh-thumb" alt="방금 찍은 사진">
+</div>
+
+<!-- 사진 보기 -->
+<div id="viewer" class="overlay viewer" hidden>
+  <div class="v-top">
+    <button id="vClose" class="icon-btn" aria-label="닫기">✕</button>
+    <div id="vTitle" class="v-title"></div>
+    <button id="vDelete" class="icon-btn" aria-label="삭제">🗑</button>
+  </div>
+  <div class="v-scroll">
+    <div id="vMedia" class="v-media"></div>
+    <div id="vInfo" class="v-info"></div>
+    <div id="vActions" class="v-actions"></div>
+    <div id="vPlan" class="plan-host v-plan"></div>
+  </div>
+</div>
+
+<div id="dialog" class="overlay dialog" hidden><div class="d-box" id="dBox"></div></div>
+<div id="busy" class="busy" hidden><div><div class="spinner"></div><p id="busyMsg"></p></div></div>
+<div id="toast" class="toast" role="status"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
