@@ -8,7 +8,7 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const DEG = Math.PI / 180;
 const PDF_ID = '__pdf';
 
@@ -16,10 +16,11 @@ const PDF_ID = '__pdf';
 const S = {
   pkg: null, floors: [], floorCache: new Map(),
   items: [], byId: new Map(), names: null,
-  settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null },
+  settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null, toPhotos: true },
   tab: null, day: today(), planFloor: null, planSel: null, issueFilter: 'open',
-  mode: 'normal', fixOf: null, tbmCount: 0,
+  mode: 'normal', fixOf: null, tbmCount: 0, tbmShots: [],
   lastSetup: null, swReg: null,
+  inPhotos: new Set(), // ids already handed to the Photos app (kept apart from the records so a save never races it)
 };
 const vis = () => S.items.filter((i) => !i.draft);
 const north = () => (S.pkg && S.pkg.north && S.pkg.north.cw) || 0;
@@ -117,6 +118,12 @@ async function usePlan(ctx) {
   PV.onTap = ctx.onTap || null;
   PV.drawStatic = ctx.drawStatic || null;
   PV.drawDynamic = ctx.drawDynamic || null;
+  PV.onPress = ctx.onPress || null;
+  PV.onHold = ctx.onHold || null;
+  PV.onDragStart = ctx.onDragStart || null;
+  PV.onDrag = ctx.onDrag || null;
+  PV.onDragEnd = ctx.onDragEnd || null;
+  PV.hideLoupe();
   PV.mount(ctx.host);
   const fl = await getFloor(ctx.floor);
   if (planCtx !== ctx) return;
@@ -344,6 +351,7 @@ async function onCaptured(media) {
     try { await putItem(it, media.blob, media.thumb); }
     catch (e) { alertBox('저장하지 못했어요', (e && e.message) || '저장 공간이 부족할 수 있어요.'); return; }
     S.tbmCount++;
+    S.tbmShots.push({ id: it.id, blob: media.blob, name: photoName(it), mime: it.mime });
     renderCamBanner();
     renderCamLast();
     toast(`TBM 사진 저장 (${S.tbmCount}장)`);
@@ -358,10 +366,16 @@ async function onCaptured(media) {
 function startTbm() {
   S.mode = 'tbm';
   S.fixOf = null;
+  S.tbmShots = [];
   S.tbmCount = vis().filter((i) => i.tbm && i.day === today()).length;
   showTab('camera');
 }
 function endTbm() {
+  const shots = S.tbmShots;
+  S.tbmShots = [];
+  if (S.settings.toPhotos && shots.length) {
+    shareToPhotos(shots).then((r) => { if (r === 'shared') markInPhotos(shots.map((x) => x.id)); });
+  }
   S.mode = 'normal';
   renderCamBanner();
   S.day = today();
@@ -378,6 +392,70 @@ function cancelFix() { S.mode = 'normal'; S.fixOf = null; renderCamBanner(); }
 
 async function chooseFloor(cur) {
   return choose('층 고르기', S.floors.map((f) => ({ label: f.label, value: f.key, desc: f.sheet, current: f.key === cur })));
+}
+
+// ================================================================ Photos app
+// iOS lets a web app put a picture into the Photos app only through the share sheet ("이미지 저장"),
+// and only from a tap, so these are called first thing in a tap handler.
+function shareToPhotos(list) {
+  try {
+    const files = list.map((x) => new File([x.blob], x.name, { type: x.mime || x.blob.type || 'image/jpeg' }));
+    if (!navigator.share || !navigator.canShare || !navigator.canShare({ files })) return Promise.resolve('unsupported');
+    return navigator.share({ files }).then(() => 'shared', (e) => (e && e.name === 'AbortError' ? 'cancelled' : 'failed'));
+  } catch (e) {
+    return Promise.resolve('failed');
+  }
+}
+async function markInPhotos(ids) {
+  for (const id of ids) S.inPhotos.add(id);
+  await db.kvSet('inPhotos', [...S.inPhotos]).catch(() => {});
+  renderCurrent();
+}
+const photoName = (it) => `${yymmdd(it.day)}_${timeOf(it.ts).replace(':', '')}_${it.id.slice(-4)}.${extOf(it)}`;
+function photosOnSave() {
+  if (!S.settings.toPhotos || !C.open || C.saving || C.mode === 'edit' || !C.media) return;
+  const it = C.item;
+  shareToPhotos([{ blob: C.media.blob, name: photoName(it), mime: it.mime }]).then((r) => {
+    if (r === 'shared') markInPhotos([it.id]);
+    else if (r === 'unsupported') toast('이 기기에서는 사진 앱 저장을 쓸 수 없어요');
+  });
+}
+function viewerToPhotos(it) {
+  if (!V.blob || !V.item || V.item.id !== it.id) { toast('사진을 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요'); return; }
+  shareToPhotos([{ blob: V.blob, name: nameOf(it), mime: it.mime }]).then((r) => {
+    if (r === 'shared') markInPhotos([it.id]);
+    else if (r === 'unsupported') toast('이 기기에서는 사진 앱 저장을 쓸 수 없어요');
+  });
+}
+// several photos at once: read them first, then hand them over from a fresh tap
+async function photosBatch(list) {
+  if (!list.length) return;
+  const b = busy('사진을 준비하는 중…');
+  const files = [];
+  try {
+    for (const it of list) {
+      const f = await db.get('files', it.id);
+      if (f && f.blob) files.push({ id: it.id, blob: f.blob, name: nameOf(it), mime: it.mime });
+    }
+  } finally { b.done(); }
+  if (!files.length) { toast('파일을 찾지 못했어요'); return; }
+  const size = files.reduce((t, x) => t + x.blob.size, 0);
+  const already = list.filter((i) => S.inPhotos.has(i.id)).length;
+  await openDialog((box, close) => {
+    const go = el('button', {
+      class: 'btn primary',
+      onclick: () => {
+        shareToPhotos(files).then((r) => {
+          if (r === 'shared') { markInPhotos(files.map((x) => x.id)); toast(`${files.length}개를 보냈어요`); close(); }
+          else if (r === 'unsupported') { toast('이 기기에서는 사진 앱 저장을 쓸 수 없어요'); close(); }
+        });
+      },
+    }, '사진 앱에 저장');
+    box.append(el('h3', {}, '사진 앱에 저장'),
+      el('p', { class: 'pre' }, `${files.length}개 · ${fmtBytes(size)}` + (already ? `\n이 중 ${already}개는 이미 사진 앱에 보낸 적이 있어요.` : '') +
+        "\n다음 화면에서 '이미지 저장'(영상이 섞여 있으면 '항목 저장')을 누르세요."),
+      el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
+  }, { dismiss: false });
 }
 
 // ================================================================ location sheet (after the shutter)
@@ -417,6 +495,7 @@ function sheetCtx(focus) {
   const st = C.ghost || C;
   return {
     name: 'sheet', host: $('#shPlan'), floor: C.floor, onTap: onSheetTap,
+    onPress: onSheetPress, onHold: onSheetHold, onDragStart: onSheetDragStart, onDrag: onSheetDrag, onDragEnd: onSheetDragEnd,
     drawStatic: drawSheetStatic, drawDynamic: drawSheetDynamic, focus: focus && st.pin ? st.pin : null,
   };
 }
@@ -452,6 +531,43 @@ function onSheetTap(p) {
   renderSheet();
   PV.refresh();
 }
+// Press and hold drops the pin under the finger and it follows until the finger lifts.
+// The pin itself can be grabbed and dragged at any time; a quick swipe elsewhere still moves the drawing.
+function onSheetPress(p) {
+  if (!C.open || !PV.floor || PV.floor.key !== C.floor) return null;
+  const st = C.ghost || C;
+  if (st.pin && Math.hypot(p[0] - st.pin[0], p[1] - st.pin[1]) < 24 * PV.ptPerPx()) return { mode: 'grab', offset: [st.pin[0] - p[0], st.pin[1] - p[1]] };
+  if (C.ghost || !C.pin || C.step === 'pin') return { mode: 'hold' };
+  return null;
+}
+function onSheetHold(p) {
+  if (!C.open) return false;
+  if (C.ghost) Object.assign(C, { ghost: null, pin: null, members: [], manualDir: null, step: 'pin' });
+  C.pin = [r2(p[0]), r2(p[1])];
+  C.dragging = true;
+  renderSheet();
+  PV.refresh();
+  return true;
+}
+function onSheetDragStart() {
+  if (C.ghost) adoptGhost();
+  C.dragging = true;
+  renderSheet();
+}
+let dragFrame = 0;
+function onSheetDrag(p) {
+  if (!C.open) return;
+  C.pin = [r2(p[0]), r2(p[1])];
+  PV.refresh();
+  if (!dragFrame) dragFrame = requestAnimationFrame(() => { dragFrame = 0; if (C.open) renderSheetInfo(); });
+}
+function onSheetDragEnd() {
+  C.dragging = false;
+  if (!C.open) return;
+  if (C.step === 'pin') C.step = 'member';
+  renderSheet();
+  PV.refresh();
+}
 function drawSheetStatic(g) {
   const fl = PV.floor;
   if (!C.open || !fl || fl.key !== C.floor) return;
@@ -470,18 +586,19 @@ function drawSheetDynamic(g, px) {
   if (!C.open || !fl || fl.key !== C.floor) return;
   const st = C.ghost || C, ghost = !!C.ghost;
   if (!st.noMember) for (const r of st.members) if (r.id === 'slab') slabMark(g, r.at, px, ghost);
-  if (st.pin) pinMark(g, st.pin, px, ghost ? 'pin ghost' : (C.step === 'pin' && C.pin ? 'pin moving' : 'pin'));
+  if (st.pin) pinMark(g, st.pin, px, ghost ? 'pin ghost' : ((C.step === 'pin' && C.pin) || C.dragging ? 'pin moving' : 'pin'));
 }
 function sheetHint() {
+  if (C.dragging) return '손가락을 떼면 그 자리에 핀이 놓여요.';
   if (C.ghost) {
     return C.mode === 'fix'
       ? '이슈 사진과 같은 자리면 "그대로". 다른 자리면 서 있던 곳을 누르세요.'
       : '지난 사진과 같은 자리면 "그대로". 다른 곳이면 서 있던 곳을 누르세요.';
   }
-  if (!C.pin) return '사진 찍을 때 서 있던 곳을 도면에서 누르세요.';
-  if (C.step === 'pin') return '옮길 곳을 누르세요.';
+  if (!C.pin) return '서 있던 곳을 누르세요. 누른 채로 움직이면 핀이 따라와요.';
+  if (C.step === 'pin') return '옮길 곳을 누르세요. 누른 채로 움직이면 핀이 따라와요.';
   if (C.noMember) return '찍은 방향 쪽을 누르세요.' + (C.item.heading != null ? ' 안 누르면 나침반 방향으로 저장돼요.' : '');
-  return C.members.length ? '부재를 더 누르거나, 고른 부재를 다시 눌러 빼세요.' : '찍은 부재(기둥·보·벽·슬래브)를 누르세요. 여러 개 고를 수 있어요.';
+  return C.members.length ? '부재를 더 누르거나, 고른 부재를 다시 눌러 빼세요.' : '찍은 부재(기둥·보·벽·슬래브)를 누르세요. 핀은 끌어서 옮길 수 있어요.';
 }
 function renderSheet() {
   const st = C.ghost || C;
@@ -497,7 +614,7 @@ function renderSheet() {
   later.hidden = C.mode !== 'new';
   $('.sh-bottom').classList.toggle('three', C.mode !== 'new');
   if (C.ghost) { move.textContent = '고치기'; move.disabled = false; move.setAttribute('aria-pressed', 'false'); }
-  else { move.textContent = '핀 옮기기'; move.disabled = !C.pin; move.setAttribute('aria-pressed', String(!!C.pin && C.step === 'pin')); }
+  else { move.textContent = '핀 옮기기'; move.disabled = !C.pin; move.setAttribute('aria-pressed', String(!!C.pin && C.step === 'pin' && !C.dragging)); }
   save.textContent = C.ghost ? '그대로' : '저장';
   save.disabled = !C.ghost && !C.pin;
   $('#shMemo').textContent = C.memo ? '메모 ✓' : '메모';
@@ -642,7 +759,7 @@ function renderViewerInfo(it) {
   if (it.pitch != null) add('기울기', pitchText(it.pitch));
   if (it.issue) add('이슈', el('b', { class: it.issue.status === 'open' ? 'st-open' : 'st-done' }, issueText(it)));
   if (it.memo) add('메모', it.memo);
-  add('파일', el('code', {}, nameOf(it)), ' ', [it.w && it.h ? `${it.w}×${it.h}` : '', it.size ? fmtBytes(it.size) : '', LENS[it.lens] || ''].filter(Boolean).join(' · '));
+  add('파일', el('code', {}, nameOf(it)), ' ', [it.w && it.h ? `${it.w}×${it.h}` : '', it.size ? fmtBytes(it.size) : '', LENS[it.lens] || '', S.inPhotos.has(it.id) ? '사진 앱에 보냄' : ''].filter(Boolean).join(' · '));
   $('#vInfo').replaceChildren(...rows);
 }
 function renderViewerActions(it) {
@@ -662,6 +779,7 @@ function renderViewerActions(it) {
     else A.push(btn('다시 미조치로', () => setIssue(it, 'reopen')));
   }
   if (!it.tbm) A.push(btn(it.pin ? '위치 고치기' : '위치 붙이기', () => openSheet({ mode: 'edit', item: it }), it.pin ? '' : 'primary'));
+  A.push(btn(S.inPhotos.has(it.id) ? '사진 앱에 다시 저장' : '사진 앱에 저장', () => viewerToPhotos(it)));
   A.push(btn('메모', () => editMemo(it)));
   A.push(btn('내보내기', () => exportOne(it)));
   $('#vActions').replaceChildren(...A);
@@ -796,8 +914,8 @@ function renderDays() {
 function renderSelBar() {
   $('#dSelect').textContent = D.selecting ? '취소' : '선택';
   $('#dSelBar').hidden = !D.selecting;
-  $('#dSelCount').textContent = `${D.sel.size}개 선택`;
-  for (const id of ['dSelMemo', 'dSelExport', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
+  $('#dSelCount').textContent = `${D.sel.size}개`;
+  for (const id of ['dSelMemo', 'dSelExport', 'dSelPhotos', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
 }
 function stepDay(dir) {
   const days = [...new Set(vis().map((i) => i.day))].sort();
@@ -1070,7 +1188,7 @@ async function makeBackup() {
     const entries = [];
     const meta = {
       format: 'fieldphoto-backup', version: 1, app: APP_VERSION, created: new Date().toISOString(),
-      pkg: S.pkg, settings: S.settings, items, registers: await db.all('registers'), regItems: await db.all('regItems'),
+      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.inPhotos], registers: await db.all('registers'), regItems: await db.all('regItems'),
     };
     entries.push({ name: 'backup.json', text: JSON.stringify(meta) });
     let k = 0;
@@ -1149,6 +1267,7 @@ async function restoreFrom(file) {
       if (meta.settings.capture) S.settings.capture = meta.settings.capture;
     }
     S.settings.lastBackup = Math.max(S.settings.lastBackup || 0, Date.parse(meta.created) || 0);
+    if (Array.isArray(meta.inPhotos)) { for (const id of meta.inPhotos) S.inPhotos.add(id); db.kvSet('inPhotos', [...S.inPhotos]).catch(() => {}); }
     saveSettings();
     setItems(await db.all('items'));
   } catch (e) {
@@ -1322,6 +1441,8 @@ async function wipeData() {
     await db.clear('regItems');
     await db.kvSet('lastSetup', null);
     S.lastSetup = null;
+    S.inPhotos = new Set();
+    await db.kvSet('inPhotos', []);
     setItems([]);
   } finally { b.done(); }
   toast('모두 지웠어요');
@@ -1357,6 +1478,15 @@ async function renderMore() {
     btns(btn('센서 켜기', async () => { const ok = await sensors.requestPermission(); toast(ok ? '센서를 켰어요' : '센서 권한이 없어요'); setTimeout(renderMore, 600); }),
       btn('방향 맞추기', calibrate),
       S.settings.calib ? btn('보정 지우기', () => { S.settings.calib = 0; saveSettings(); renderMore(); }) : null)));
+  const segP = el('div', { class: 'seg' },
+    ...[[true, '저장할 때마다'], [false, '안 함']].map(([v, l]) => el('button', {
+      'aria-pressed': String(!!S.settings.toPhotos === v),
+      onclick: () => { S.settings.toPhotos = v; saveSettings(); renderMore(); },
+    }, l)));
+  parts.push(group('사진 앱에도 저장',
+    el('p', {}, "아이폰은 공유 창의 '이미지 저장'을 눌러야 사진 앱에 들어가요. '저장할 때마다'를 고르면 위치를 저장할 때 공유 창이 떠요. TBM은 '끝'을 누를 때 한 번에 떠요."),
+    el('p', {}, "날짜 화면에서 여러 장을 골라 '사진 앱'으로 한 번에 넣을 수도 있어요. iCloud 사진이 켜져 있으면 사진 앱에 넣은 사진은 iCloud에도 올라가요."),
+    segP));
   parts.push(group('내보내기',
     el('p', {}, '고른 기간의 사진을 정해진 이름으로 바꿔 ZIP 하나로 묶어요. 사진목록.csv(엑셀)가 같이 들어가요.'),
     btns(btn('기간 골라 내보내기', exportRange))));
@@ -1448,8 +1578,8 @@ function bindUI() {
     const t = await promptText('메모', C.memo, { placeholder: '예: 균열 0.3mm, 다음 주 재확인' });
     if (t !== null) { C.memo = t; renderSheet(); }
   };
-  $('#shLater').onclick = () => finishSheet(true);
-  $('#shSave').onclick = () => finishSheet(false);
+  $('#shLater').onclick = () => { photosOnSave(); finishSheet(true); };
+  $('#shSave').onclick = () => { photosOnSave(); finishSheet(false); };
   // viewer
   $('#vClose').onclick = closeViewer;
   $('#vDelete').onclick = async () => {
@@ -1477,6 +1607,7 @@ function bindUI() {
     renderDays();
   };
   $('#dSelExport').onclick = () => exportItems([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
+  $('#dSelPhotos').onclick = () => photosBatch([...D.sel].map((id) => S.byId.get(id)).filter(Boolean).sort((a, b) => a.ts - b.ts));
   $('#dSelDelete').onclick = async () => {
     const ids = [...D.sel];
     if (!ids.length) return;
@@ -1551,6 +1682,7 @@ async function boot() {
   db.persist();
   S.settings = { ...S.settings, ...((await db.kvGet('settings', {})) || {}) };
   S.lastSetup = await db.kvGet('lastSetup', null);
+  S.inPhotos = new Set((await db.kvGet('inPhotos', [])) || []);
   setItems(await db.all('items'));
   // a photo whose location step was interrupted is kept as a "위치 없음" photo
   const drafts = S.items.filter((i) => i.draft);

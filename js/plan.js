@@ -68,12 +68,21 @@ export class PlanView {
       el('button', { 'aria-label': '축소', onclick: () => this.zoomCenter(1 / 1.6) }, '−'),
       el('button', { 'aria-label': '전체 보기', onclick: () => this.fit() }, '⤢'));
     zoom.addEventListener('pointerdown', (e) => e.stopPropagation());
-    this.stage.append(this.world, zoom);
+    this.loupe = el('div', { class: 'plan-loupe' }, el('canvas'), el('i'));
+    this.stage.append(this.world, zoom, this.loupe);
+    this.stage.addEventListener('contextmenu', (e) => e.preventDefault());
     this.view = { s: 1, tx: 0, ty: 0, fit: 1 };
     this.floor = null;
     this.onTap = null;
     this.drawStatic = null;
     this.drawDynamic = null;
+    // press hooks (a screen sets them): onPress(p) -> {mode:'grab', offset} | {mode:'hold'} | null,
+    // onHold(p) -> true to start dragging, onDragStart(), onDrag(p), onDragEnd(p)
+    this.onPress = null;
+    this.onHold = null;
+    this.onDragStart = null;
+    this.onDrag = null;
+    this.onDragEnd = null;
     this.hi = { doc: null, page: null, pageKey: null, task: null, timer: 0, gen: 0, front: null };
     this.rowCache = new Map();
     this.bindGestures();
@@ -160,12 +169,43 @@ export class PlanView {
     const ptrs = new Map();
     let g = null;
     const st = this.stage;
+    const HOLD_MS = 180;
+    const stopHold = () => { if (g && g.hold) { clearTimeout(g.hold); g.hold = 0; } };
+    const dragTo = (cx, cy) => {
+      const p = this.toPlan(cx, cy);
+      const q = [p[0] + g.drag.off[0], p[1] + g.drag.off[1]];
+      g.drag.last = q;
+      if (this.onDrag) this.onDrag(q);
+      this.showLoupe(q, cx, cy);
+    };
+    const endDrag = () => {
+      if (!g || !g.drag) return;
+      const last = g.drag.last;
+      g.drag = null;
+      this.hideLoupe();
+      if (this.onDragEnd) this.onDragEnd(last);
+    };
     st.addEventListener('pointerdown', (e) => {
       if (!this.floor) return;
       st.setPointerCapture(e.pointerId);
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (ptrs.size === 1) g = { type: 'one', x0: e.clientX, y0: e.clientY, t0: performance.now(), tx0: this.view.tx, ty0: this.view.ty, moved: false };
-      else if (ptrs.size === 2) {
+      if (ptrs.size === 1) {
+        g = { type: 'one', x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, t0: performance.now(), tx0: this.view.tx, ty0: this.view.ty, moved: false, drag: null, grab: null, hold: 0 };
+        const r = this.onPress ? this.onPress(this.toPlan(e.clientX, e.clientY), e) : null;
+        if (r && r.mode === 'grab') g.grab = { off: r.offset || [0, 0] };
+        else if (r && r.mode === 'hold') {
+          const mine = g;
+          g.hold = setTimeout(() => {
+            if (g !== mine) return;
+            g.hold = 0;
+            if (g.moved || ptrs.size !== 1) return;
+            const p = this.toPlan(g.x, g.y);
+            if (this.onHold && this.onHold(p)) { g.drag = { off: [0, 0], last: p }; this.showLoupe(p, g.x, g.y); }
+          }, HOLD_MS);
+        }
+      } else if (ptrs.size === 2) {
+        stopHold();
+        endDrag();
         const [a, b] = [...ptrs.values()];
         g = { type: 'two', d0: Math.hypot(a.x - b.x, a.y - b.y), s0: this.view.s, mx0: (a.x + b.x) / 2, my0: (a.y + b.y) / 2, tx0: this.view.tx, ty0: this.view.ty };
       }
@@ -175,8 +215,20 @@ export class PlanView {
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
       const r = st.getBoundingClientRect();
       if (g.type === 'one' && ptrs.size === 1) {
+        g.x = e.clientX; g.y = e.clientY;
+        if (g.drag) { dragTo(e.clientX, e.clientY); return; }
         const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
-        if (!g.moved && Math.hypot(dx, dy) > 8) g.moved = true;
+        if (!g.moved && Math.hypot(dx, dy) > 8) {
+          g.moved = true;
+          stopHold();
+          if (g.grab) {
+            // the finger started on the pin: move the pin, not the drawing
+            g.drag = { off: g.grab.off, last: null };
+            if (this.onDragStart) this.onDragStart();
+            dragTo(e.clientX, e.clientY);
+            return;
+          }
+        }
         if (g.moved) { this.view.tx = g.tx0 + dx; this.view.ty = g.ty0 + dy; this.apply(); }
       } else if (g.type === 'two' && ptrs.size === 2) {
         const [a, b] = [...ptrs.values()];
@@ -190,11 +242,15 @@ export class PlanView {
     const end = (e) => {
       if (!ptrs.has(e.pointerId)) return;
       ptrs.delete(e.pointerId);
-      if (g && g.type === 'one' && !g.moved && ptrs.size === 0 && performance.now() - g.t0 < 600 && this.onTap) {
+      stopHold();
+      if (g && g.drag) {
+        endDrag();
+        g = null;
+      } else if (g && g.type === 'one' && !g.moved && ptrs.size === 0 && performance.now() - g.t0 < 600 && this.onTap) {
         this.onTap(this.toPlan(e.clientX, e.clientY), e);
       }
       if (ptrs.size === 0) g = null;
-      else if (ptrs.size === 1) { const [q] = [...ptrs.values()]; g = { type: 'one', x0: q.x, y0: q.y, t0: 0, tx0: this.view.tx, ty0: this.view.ty, moved: true }; }
+      else if (ptrs.size === 1) { const [q] = [...ptrs.values()]; g = { type: 'one', x0: q.x, y0: q.y, x: q.x, y: q.y, t0: 0, tx0: this.view.tx, ty0: this.view.ty, moved: true, drag: null, grab: null, hold: 0 }; }
     };
     st.addEventListener('pointerup', end);
     st.addEventListener('pointercancel', end);
@@ -204,6 +260,41 @@ export class PlanView {
       this.zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
     }, { passive: false });
   }
+
+  // magnifier shown above the finger while a pin is dragged, so the spot under the finger stays visible
+  showLoupe(p, cx, cy) {
+    const f = this.floor;
+    if (!f) return;
+    const D = 128, mag = 2;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const box = this.loupe, c = box.firstChild;
+    if (c.width !== Math.round(D * dpr)) { c.width = Math.round(D * dpr); c.height = Math.round(D * dpr); }
+    const r = this.stage.getBoundingClientRect();
+    let left = cx - r.left - D / 2, top = cy - r.top - D - 64;
+    if (top < 4) top = Math.min(r.height - D - 4, cy - r.top + 64);
+    left = Math.max(4, Math.min(r.width - D - 4, left));
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+    box.style.display = 'block';
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    const ix = (p[0] - f.plan[0]) * f.k, iy = (p[1] - f.plan[1]) * f.k; // picture pixels
+    const w = D / (this.view.s * mag);
+    const hi = this.hi.front;
+    let done = false;
+    if (hi && hi.style.display === 'block') {
+      const hx = parseFloat(hi.style.left), hy = parseFloat(hi.style.top), hw = parseFloat(hi.style.width);
+      const k = hi.width / hw;
+      const sx = (ix - w / 2 - hx) * k, sy = (iy - w / 2 - hy) * k, sw = w * k;
+      if (sx >= 0 && sy >= 0 && sx + sw <= hi.width && sy + sw <= hi.height) { ctx.drawImage(hi, sx, sy, sw, sw, 0, 0, c.width, c.height); done = true; }
+    }
+    if (!done && this.img.complete && this.img.naturalWidth) {
+      const sc = this.img.naturalWidth / f.imgW;
+      ctx.drawImage(this.img, (ix - w / 2) * sc, (iy - w / 2) * sc, w * sc, w * sc, 0, 0, c.width, c.height);
+    }
+  }
+  hideLoupe() { this.loupe.style.display = 'none'; }
 
   // ------------------------------------------------------------ overlay
   refresh() {
