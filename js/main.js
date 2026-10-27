@@ -8,7 +8,28 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
+const APP_DATE = '2026-10-27';
+
+// Start screen: shows the running version (the one this code is) for a moment, then fades out. A tap skips it.
+const SPLASH_MIN_MS = 1300;
+{
+  const v = document.getElementById('splashVer');
+  if (v) v.textContent = `버전 ${APP_VERSION} · ${APP_DATE}`;
+  const sp = document.getElementById('splash');
+  if (sp) sp.addEventListener('click', () => hideSplash(true));
+}
+function hideSplash(now) {
+  const sp = document.getElementById('splash');
+  if (!sp || sp.dataset.closing) return;
+  const wait = now ? 0 : Math.max(0, SPLASH_MIN_MS - performance.now());
+  setTimeout(() => {
+    if (sp.dataset.closing) return;
+    sp.dataset.closing = '1';
+    sp.classList.add('out');
+    setTimeout(() => sp.remove(), 320);
+  }, wait);
+}
 const DEG = Math.PI / 180;
 const PDF_ID = '__pdf';
 
@@ -1567,7 +1588,7 @@ async function renderMore() {
     el('p', {}, '이 폰에 저장된 사진·영상·기록을 모두 지워요. 도면은 남아요.'),
     btns(btn('사진·기록 모두 지우기', wipeData, 'danger'))));
   parts.push(group('앱 정보',
-    el('p', {}, `현장 사진 ${APP_VERSION} · 사진과 기록은 이 폰에만 저장되고, 어디로도 보내지 않아요.`),
+    el('p', {}, `현장 사진 ${APP_VERSION} (${APP_DATE}) · 사진과 기록은 이 폰에만 저장되고, 어디로도 보내지 않아요.`),
     btns(btn('업데이트 확인', async () => {
       if (!S.swReg) { toast('오프라인 설치가 아직 안 됐어요'); return; }
       try { await S.swReg.update(); toast('확인했어요. 새 버전이 있으면 다음에 열 때 바뀌어요.', 2600); } catch (e) { toast('인터넷 연결을 확인해 주세요'); }
@@ -1743,6 +1764,7 @@ async function boot() {
   } catch (e) {
     document.body.append(el('div', { class: 'overlay welcome-ov' }, el('div', { class: 'welcome' },
       el('h2', {}, '저장소를 열 수 없어요'), el('p', {}, '개인정보 보호(비공개) 모드에서는 쓸 수 없어요. 일반 모드나 홈 화면 앱으로 열어 주세요.'))));
+    hideSplash(true);
     return;
   }
   db.persist();
@@ -1757,10 +1779,11 @@ async function boot() {
   registerSW();
   if (!(window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function')) sensors.start();
   const pkg = await db.kvGet('pkg');
-  if (!pkg) { showWelcome(); return; }
+  if (!pkg) { showWelcome(); hideSplash(); return; }
   applyPkg(pkg);
   startApp();
+  hideSplash();
 }
 
 window.__app = { S, PV, db }; // for checking on a computer; nothing here leaves the phone
-boot();
+boot().catch((e) => { hideSplash(true); alertBox('앱을 여는 중 문제가 생겼어요', (e && e.message) || String(e)); });

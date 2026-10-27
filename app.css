@@ -256,3 +256,13 @@ h2 { font-size: 18px; margin: 0; }
 #scr-days .cell { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 #dGrid .cell { touch-action: pan-y; }
 .badge.sent { background: rgba(0,0,0,.42); font-weight: 600; }
+
+/* start screen with the running version */
+.splash { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: var(--safe-t) 24px var(--safe-b); background: #121212; color: #f1f1ec; transition: opacity .3s ease; }
+.splash img { width: 92px; height: 92px; border-radius: 22px; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
+.splash h1 { margin: 14px 0 0; font-size: 24px; font-weight: 800; letter-spacing: -0.01em; }
+.splash p { margin: 0; font-size: 15px; color: #a8a8a1; font-variant-numeric: tabular-nums; }
+.splash-bar { width: 116px; height: 3px; margin-top: 22px; border-radius: 2px; background: rgba(255,255,255,.12); overflow: hidden; }
+.splash-bar span { display: block; width: 40%; height: 100%; border-radius: 2px; background: #d4ff1f; animation: splashbar 1.1s ease-in-out infinite; }
+@keyframes splashbar { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.splash.out { opacity: 0; pointer-events: none; }
