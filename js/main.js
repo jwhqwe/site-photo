@@ -8,11 +8,12 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.4.0';
 const APP_DATE = '2026-10-27';
 
-// Start screen: shows the running version (the one this code is) for a moment, then fades out. A tap skips it.
-const SPLASH_MIN_MS = 1300;
+// Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
+const SPLASH_MIN_MS = 2500;
+const SPLASH_FROM = performance.now();
 {
   const v = document.getElementById('splashVer');
   if (v) v.textContent = `버전 ${APP_VERSION} · ${APP_DATE}`;
@@ -22,7 +23,7 @@ const SPLASH_MIN_MS = 1300;
 function hideSplash(now) {
   const sp = document.getElementById('splash');
   if (!sp || sp.dataset.closing) return;
-  const wait = now ? 0 : Math.max(0, SPLASH_MIN_MS - performance.now());
+  const wait = now ? 0 : Math.max(0, SPLASH_MIN_MS - (performance.now() - SPLASH_FROM));
   setTimeout(() => {
     if (sp.dataset.closing) return;
     sp.dataset.closing = '1';
@@ -1621,8 +1622,16 @@ async function renderMore() {
 }
 
 // ================================================================ tabs and wiring
+// The status bar is a solid strip above the app (see index.html); it takes the colour of the screen below it.
+function setStatusColor(t) {
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (!m) return;
+  const panel = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() || '#ffffff';
+  m.setAttribute('content', t === 'camera' ? '#000000' : panel);
+}
 function showTab(t) {
   const prev = S.tab;
+  setStatusColor(t);
   S.tab = t;
   $$('.screen').forEach((s) => s.classList.toggle('on', s.dataset.tab === t));
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
@@ -1738,6 +1747,7 @@ function bindUI() {
 }
 
 function showWelcome() {
+  setStatusColor('welcome');
   let w = $('#welcome');
   if (!w) { w = el('div', { id: 'welcome', class: 'overlay welcome-ov' }); document.body.append(w); }
   const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
