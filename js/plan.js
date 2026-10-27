@@ -69,7 +69,8 @@ export class PlanView {
       el('button', { 'aria-label': '전체 보기', onclick: () => this.fit() }, '⤢'));
     zoom.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.loupe = el('div', { class: 'plan-loupe' }, el('canvas'), el('i'));
-    this.stage.append(this.world, zoom, this.loupe);
+    this.msg = el('div', { class: 'plan-msg', hidden: true }, '도면 그림을 읽지 못했어요.\n더보기 → 도면 파일 가져오기로 도면 파일을 다시 넣어 주세요.');
+    this.stage.append(this.world, zoom, this.loupe, this.msg);
     this.stage.addEventListener('contextmenu', (e) => e.preventDefault());
     this.view = { s: 1, tx: 0, ty: 0, fit: 1 };
     this.floor = null;
@@ -102,7 +103,7 @@ export class PlanView {
     this.hi.gen++;
     if (this.hi.task) { try { this.hi.task.cancel(); } catch (e) { /* ignore */ } this.hi.task = null; }
     this.hideHi();
-    if (!floor) { this.img.removeAttribute('src'); return; }
+    if (!floor) { this.img.removeAttribute('src'); this.msg.hidden = true; return; }
     const W = floor.imgW, H = floor.imgH;
     this.img.width = W; this.img.height = H;
     this.roomsImg.style.width = W + 'px'; this.roomsImg.style.height = H + 'px';
@@ -113,7 +114,11 @@ export class PlanView {
     this.imgUrl = URL.createObjectURL(floor.imgBlob);
     this.roomsUrl = floor.roomsBlob ? URL.createObjectURL(floor.roomsBlob) : '';
     await new Promise((res) => { this.img.onload = res; this.img.onerror = res; this.img.src = this.imgUrl; });
-    this.roomsImg.src = this.roomsUrl || '';
+    // a picture that cannot be read would show the iPhone's blue "?" -- say what to do instead
+    const readable = this.img.naturalWidth > 0;
+    this.img.style.visibility = readable ? '' : 'hidden';
+    this.msg.hidden = readable;
+    if (this.roomsUrl) this.roomsImg.src = this.roomsUrl; else this.roomsImg.removeAttribute('src');
     if (!keepView) this.fit();
     this.refresh();
   }

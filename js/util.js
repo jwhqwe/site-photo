@@ -167,6 +167,17 @@ export async function readZip(blob) {
   }
   return out;
 }
+// iPhone (WebKit) saves a Blob that is only a part of a bigger file -- a zip entry, a slice -- into
+// IndexedDB as that whole bigger file. Anything cut out of another file gets its own bytes before it is saved.
+export async function ownCopy(blob, type) {
+  if (!blob) return blob;
+  return new Blob([await blob.arrayBuffer()], { type: type == null ? blob.type : type });
+}
+// the first bytes of a stored file, e.g. 'PK\x03\x04' for a zip
+export async function headOf(blob, n = 4) {
+  try { return new Uint8Array(await blob.slice(0, n).arrayBuffer()); } catch (e) { return new Uint8Array(0); }
+}
+export const isZipHead = (h) => h.length >= 4 && h[0] === 0x50 && h[1] === 0x4b && h[2] === 3 && h[3] === 4;
 
 // ---------------------------------------------------------------- EXIF: the shooting date and time inside a JPEG
 // so the Photos app, a PC or a register shows when the photo was taken, not when it was saved.

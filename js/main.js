@@ -1,14 +1,14 @@
 // 현장 사진 — app logic. Drawings, photos and records live only in this phone's storage (IndexedDB).
 import {
   $, $$, el, uid, dayOf, today, yymmdd, timeOf, dayLabel, addDays, extOf, computeNames, csv,
-  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif,
+  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, ownCopy, headOf, isZipHead,
 } from './util.js';
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const APP_DATE = '2026-10-27';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -521,6 +521,9 @@ function openSheet({ mode, item, draftP = null, media = null }) {
   C.ownThumb = !!(media && media.thumb);
   C.thumbUrl = C.ownThumb ? URL.createObjectURL(media.thumb) : '';
   img.removeAttribute('src');
+  img.hidden = true; // shown once it has loaded, so an unreadable one never shows the blue "?"
+  img.onload = () => { img.hidden = false; };
+  img.onerror = () => { img.hidden = true; };
   if (C.thumbUrl) img.src = C.thumbUrl;
   else thumbUrl(item.id).then((u) => { if (u && C.item === item) img.src = u; });
   $('#sheet').hidden = false;
@@ -773,7 +776,7 @@ async function renderViewer(full) {
       outBlob(it, f.blob).then((o) => { if (V.item && V.item.id === it.id) V.out = o; });
       media.append(it.kind === 'video'
         ? el('video', { src: V.url, controls: true, playsinline: true, preload: 'metadata' })
-        : el('img', { src: V.url, alt: nameOf(it) }));
+        : el('img', { src: V.url, alt: nameOf(it), onerror: (e) => e.target.replaceWith(el('p', { class: 'empty' }, '사진 파일을 읽지 못했어요')) }));
     } else media.append(el('p', { class: 'empty' }, '파일을 찾지 못했어요'));
   }
   renderViewerInfo(it);
@@ -1370,9 +1373,12 @@ async function restoreFrom(file) {
   try {
     if (withDrawings) await restoreDrawings(z);
     let n = 0;
+    const zips = new Map();
+    // a backup made from broken copies (see repairStored) holds the whole older backup in each file
+    const own = async (blob, name, type) => blob ? ((await unzipped(blob, name, type, zips).catch(() => null)) || ownCopy(blob, type)) : null;
     for (const it of items) {
-      const mf = z.get(`media/${it.id}.${extOf(it)}`), tf = z.get(`thumbs/${it.id}.jpg`);
-      await db.saveItem({ ...it, draft: false }, mf ? new Blob([mf], { type: it.mime || '' }) : null, tf ? new Blob([tf], { type: 'image/jpeg' }) : null);
+      const mn = `media/${it.id}.${extOf(it)}`, tn = `thumbs/${it.id}.jpg`;
+      await db.saveItem({ ...it, draft: false }, await own(z.get(mn), mn, it.mime || ''), await own(z.get(tn), tn, 'image/jpeg'));
       dropThumb(it.id);
       if (++n % 5 === 0) b2.set(`복원 중… ${n}/${items.length}`);
     }
@@ -1396,15 +1402,85 @@ async function restoreFrom(file) {
 }
 async function restoreDrawings(z) {
   const j = JSON.parse(await z.get('drawings/floors.json').text());
-  const recs = [];
+  const recs = [], zips = new Map();
+  const inner = (blob, name, type) => unzipped(blob, name, type, zips).catch(() => null);
   for (const f of j.floors) {
     const img = z.get(`drawings/${f.key}.webp`), rooms = z.get(`drawings/${f.key}_rooms.png`);
     if (!img) continue;
-    recs.push({ ...f, imgBlob: new Blob([img], { type: 'image/webp' }), roomsBlob: rooms ? new Blob([rooms], { type: 'image/png' }) : null });
+    recs.push({ ...f, imgBlob: (await inner(img, `drawings/${f.key}.webp`, 'image/webp')) || img,
+      roomsBlob: rooms ? (await inner(rooms, `drawings/${f.key}_rooms.png`, 'image/png')) || rooms : null });
   }
   const pdf = z.get('drawings/plan.pdf');
   const { floors: _f, importedAt: _i, ...meta } = j.pkg || {};
-  await installDrawings(meta, recs, pdf || null);
+  await installDrawings(meta, recs, pdf ? (await inner(pdf, 'drawings/plan.pdf', 'application/pdf')) || pdf : null);
+}
+
+// ================================================================ repair of restored files (1.4.3)
+// Restores made with 1.4.2 and earlier were saved by the iPhone as the whole backup ZIP for every drawing,
+// photo and thumbnail (see ownCopy). They looked fine until the app was opened again. Each broken copy still
+// holds that whole backup, so the right file is taken back out of it.
+// blob: a stored file. Returns its proper content if it turned out to be a backup ZIP, otherwise null.
+async function unzipped(blob, name, type, zips) {
+  if (!blob) return null;
+  let cur = blob, found = false;
+  for (let depth = 0; depth < 3; depth++) { // a backup made from broken copies holds them one level deeper
+    const head = await headOf(cur, 30);
+    if (!isZipHead(head)) break;
+    const key = head.join(',');
+    let z = zips.get(key);
+    if (!z) { z = await readZip(await ownCopy(cur, 'application/zip')); zips.set(key, z); }
+    const e = z.get(name);
+    if (!e) throw new Error(name + ' 없음');
+    cur = e; found = true;
+  }
+  return found ? ownCopy(cur, type) : null;
+}
+async function repairStored(items) {
+  const zips = new Map();
+  let fixed = 0, failed = 0, b = null;
+  const fix = async (blob, name, type) => {
+    try {
+      const head = blob ? await headOf(blob) : null;
+      if (!head || !isZipHead(head)) return null;
+      if (!b) {
+        b = busy('저장된 도면·사진을 고치는 중…');
+        const tip = document.querySelector('#splash .splash-tip');
+        if (tip) tip.textContent = '저장된 도면·사진을 고치는 중…';
+      }
+      const r = await unzipped(blob, name, type, zips);
+      if (r) fixed++;
+      return r;
+    } catch (e) { failed++; return null; }
+  };
+  try {
+    for (const f of await db.all('floors')) {
+      const img = await fix(f.imgBlob, `drawings/${f.key}.webp`, 'image/webp');
+      const rooms = await fix(f.roomsBlob, `drawings/${f.key}_rooms.png`, 'image/png');
+      // the other picture of the record is copied too: re-saving a Blob read back from storage breaks it on iPhone
+      if (img || rooms) await db.put('floors', { ...f, imgBlob: img || await ownCopy(f.imgBlob), roomsBlob: rooms || (f.roomsBlob ? await ownCopy(f.roomsBlob) : null) });
+    }
+    const pdf = await db.get('files', PDF_ID);
+    const p = pdf && await fix(pdf.blob, 'drawings/plan.pdf', 'application/pdf');
+    if (p) await db.put('files', { id: PDF_ID, blob: p });
+    for (const it of items) {
+      const f = await db.get('files', it.id);
+      const m = f && await fix(f.blob, `media/${it.id}.${extOf(it)}`, it.mime || f.blob.type);
+      if (m) await db.put('files', { id: it.id, blob: m });
+      const t = await db.get('thumbs', it.id);
+      const tb = t && await fix(t.blob, `thumbs/${it.id}.jpg`, 'image/jpeg');
+      if (tb) await db.put('thumbs', { id: it.id, blob: tb });
+      if (m || tb) dropThumb(it.id);
+    }
+  } finally {
+    if (b) b.done();
+  }
+  if (fixed) { S.floorCache.clear(); PV.resetPdf(); }
+  return { fixed, failed };
+}
+function repairNotice(r) {
+  if (r.failed) alertBox('일부 파일을 고치지 못했어요',
+    `도면·사진 파일 ${r.failed}개를 읽지 못했어요.\n더보기 → '도면 파일 가져오기'로 도면 파일을 다시 넣고, '백업 파일에서 복원'으로 백업을 다시 넣어 주세요.`);
+  else if (r.fixed) toast(`도면·사진 파일 ${r.fixed}개를 고쳤어요`, 3500);
 }
 
 // ================================================================ drawing package
@@ -1452,9 +1528,11 @@ function remapItems(recs) {
 async function installDrawings(meta, recs, pdfBlob) {
   if (!recs.length) throw new Error('도면 층 정보가 없어요');
   const changed = S.pkg ? remapItems(recs) : [];
+  const own = [];
+  for (const r of recs) own.push({ ...r, imgBlob: await ownCopy(r.imgBlob, 'image/webp'), roomsBlob: r.roomsBlob ? await ownCopy(r.roomsBlob, 'image/png') : null });
   await db.clear('floors');
-  await db.putMany('floors', recs);
-  if (pdfBlob) await db.put('files', { id: PDF_ID, blob: new Blob([pdfBlob], { type: 'application/pdf' }) });
+  await db.putMany('floors', own);
+  if (pdfBlob) await db.put('files', { id: PDF_ID, blob: await ownCopy(pdfBlob, 'application/pdf') });
   if (changed.length) await putRecords(changed);
   const pkg = { ...meta, floors: recs.map((r) => ({ key: r.key, label: r.label, sheet: r.sheet })), importedAt: Date.now() };
   await db.kvSet('pkg', pkg);
@@ -1831,12 +1909,19 @@ async function boot() {
   bindUI();
   const regP = registerSW();
   if (await updateOnLaunch(regP)) return;
+  // once: drawings and photos that an earlier restore saved as the whole backup ZIP
+  let repaired = null;
+  if (!(await db.kvGet('zipRepair'))) {
+    repaired = await repairStored(S.items).catch(() => null);
+    if (repaired) await db.kvSet('zipRepair', { at: Date.now(), ...repaired });
+  }
   if (!(window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function')) sensors.start();
   const pkg = await db.kvGet('pkg');
   if (!pkg) { showWelcome(); hideSplash(); return; }
   applyPkg(pkg);
   startApp();
   hideSplash();
+  if (repaired) repairNotice(repaired);
 }
 
 window.__app = { S, PV, db }; // for checking on a computer; nothing here leaves the phone
