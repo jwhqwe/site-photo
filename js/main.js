@@ -8,7 +8,7 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const APP_DATE = '2026-10-27';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -1776,15 +1776,39 @@ function startApp() {
 }
 
 function registerSW() {
-  if (!('serviceWorker' in navigator)) return;
+  if (!('serviceWorker' in navigator)) return null;
   const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-  if (location.protocol !== 'https:' && !local) return;
-  navigator.serviceWorker.register('sw.js').then((reg) => { S.swReg = reg; }).catch(() => {});
+  if (location.protocol !== 'https:' && !local) return null;
+  const p = navigator.serviceWorker.register('sw.js').then((reg) => { S.swReg = reg; return reg; }).catch(() => null);
   let had = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (had) toast('새 버전을 받았어요. 앱을 다시 열면 바뀌어요.', 3500);
+    if (had && !S.updating) toast('새 버전을 받았어요. 앱을 다시 열면 바뀌어요.', 3500);
     had = true;
   });
+  return p;
+}
+// While the start screen is up, look for a newer version once. If there is one, take it and restart right away,
+// before the camera starts, so the first launch after an update already runs it (also in Safari before
+// "홈 화면에 추가", where an old saved copy would otherwise be what gets added).
+async function updateOnLaunch(regP) {
+  if (!regP || !navigator.serviceWorker.controller || navigator.onLine === false) return false;
+  const reg = await regP;
+  if (!reg) return false;
+  const timeout = (ms) => new Promise((r) => setTimeout(r, ms));
+  try { await Promise.race([reg.update(), timeout(2500)]); } catch (e) { return false; }
+  const next = reg.installing || reg.waiting;
+  if (!next) return false;
+  S.updating = true;
+  const tip = document.querySelector('#splash .splash-tip');
+  if (tip) tip.textContent = '새 버전 받는 중…';
+  const took = await Promise.race([
+    new Promise((r) => navigator.serviceWorker.addEventListener('controllerchange', () => r(true), { once: true })),
+    timeout(12000).then(() => false),
+  ]);
+  if (took) { location.reload(); return true; }
+  S.updating = false;
+  if (tip) tip.textContent = '화면을 누르면 바로 시작해요';
+  return false;
 }
 
 async function boot() {
@@ -1805,7 +1829,8 @@ async function boot() {
   const drafts = S.items.filter((i) => i.draft);
   if (drafts.length) await putRecords(drafts.map((d) => ({ ...d, draft: false })));
   bindUI();
-  registerSW();
+  const regP = registerSW();
+  if (await updateOnLaunch(regP)) return;
   if (!(window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function')) sensors.start();
   const pkg = await db.kvGet('pkg');
   if (!pkg) { showWelcome(); hideSplash(); return; }
