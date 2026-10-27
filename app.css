@@ -251,3 +251,8 @@ h2 { font-size: 18px; margin: 0; }
 /* fixed heights so the drawing never shifts under the finger when the hint or info text changes */
 .sh-hint { height: 52px; display: flex; align-items: center; line-height: 1.35; overflow: hidden; }
 .sh-info { height: 80px; min-height: 0; overflow-y: auto; }
+
+/* day page: drag across photos to select */
+#scr-days .cell { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+#dGrid .cell { touch-action: pan-y; }
+.badge.sent { background: rgba(0,0,0,.42); font-weight: 600; }

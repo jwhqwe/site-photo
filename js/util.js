@@ -168,6 +168,81 @@ export async function readZip(blob) {
   return out;
 }
 
+// ---------------------------------------------------------------- EXIF: the shooting date and time inside a JPEG
+// so the Photos app, a PC or a register shows when the photo was taken, not when it was saved.
+const p2 = (n) => String(n).padStart(2, '0');
+export function exifDate(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}:${p2(d.getMonth() + 1)}:${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+export function exifOffset(ts) {
+  const m = -new Date(ts).getTimezoneOffset();
+  const a = Math.abs(m);
+  return `${m >= 0 ? '+' : '-'}${p2(Math.floor(a / 60))}:${p2(a % 60)}`;
+}
+// a camera's own Exif block is kept as it is
+function hasExif(u8) {
+  let p = 2;
+  while (p + 8 <= u8.length && u8[p] === 0xff) {
+    const m = u8[p + 1];
+    if (m === 0xda || m === 0xd9) break;
+    const len = (u8[p + 2] << 8) | u8[p + 3];
+    if (m === 0xe1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) return true;
+    p += 2 + len;
+  }
+  return false;
+}
+function buildExif(ts, w, h) {
+  const ascii = (str) => { const a = new Uint8Array(str.length + 1); for (let i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) & 0x7f; return a; };
+  const short = (v) => new Uint8Array([(v >> 8) & 255, v & 255]);
+  const long = (v) => new Uint8Array([(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]);
+  const dt = ascii(exifDate(ts)), off = ascii(exifOffset(ts)), sub = ascii(p2(Math.floor(new Date(ts).getMilliseconds() / 10)));
+  const sw = ascii('site-photo');
+  // [tag, type, count, bytes], sorted by tag. Types: 2 ASCII, 3 SHORT, 4 LONG, 7 UNDEFINED
+  const ifd0 = [[0x0112, 3, 1, short(1)], [0x0131, 2, sw.length, sw], [0x0132, 2, dt.length, dt], [0x8769, 4, 1, long(0)]];
+  const exif = [[0x9000, 7, 4, ascii('0232').subarray(0, 4)], [0x9003, 2, dt.length, dt], [0x9004, 2, dt.length, dt],
+    [0x9010, 2, off.length, off], [0x9011, 2, off.length, off], [0x9012, 2, off.length, off],
+    [0x9290, 2, sub.length, sub], [0x9291, 2, sub.length, sub], [0x9292, 2, sub.length, sub], [0xa001, 3, 1, short(1)]];
+  if (w && h) exif.push([0xa002, 4, 1, long(w)], [0xa003, 4, 1, long(h)]);
+  const sizeOf = (list) => {
+    let d = 0;
+    for (const e of list) if (e[3].length > 4) d += e[3].length + (e[3].length & 1);
+    return 2 + list.length * 12 + 4 + d;
+  };
+  const exifAt = 8 + sizeOf(ifd0);
+  ifd0[3][3] = long(exifAt);
+  const tiff = new Uint8Array(exifAt + sizeOf(exif));
+  const dv = new DataView(tiff.buffer);
+  tiff[0] = 0x4d; tiff[1] = 0x4d; dv.setUint16(2, 42); dv.setUint32(4, 8);
+  const write = (list, at) => {
+    dv.setUint16(at, list.length);
+    let data = at + 2 + list.length * 12 + 4;
+    list.forEach((e, i) => {
+      const q = at + 2 + i * 12;
+      dv.setUint16(q, e[0]); dv.setUint16(q + 2, e[1]); dv.setUint32(q + 4, e[2]);
+      if (e[3].length <= 4) tiff.set(e[3], q + 8);
+      else { dv.setUint32(q + 8, data); tiff.set(e[3], data); data += e[3].length + (e[3].length & 1); }
+    });
+    dv.setUint32(at + 2 + list.length * 12, 0);
+  };
+  write(ifd0, 8);
+  write(exif, exifAt);
+  const len = 2 + 6 + tiff.length;
+  const seg = new Uint8Array(2 + len);
+  seg.set([0xff, 0xe1, (len >> 8) & 255, len & 255, 0x45, 0x78, 0x69, 0x66, 0, 0]);
+  seg.set(tiff, 10);
+  return seg;
+}
+// returns the JPEG with the date and time written in, unless it already has its own Exif
+export async function withExif(blob, ts, w, h) {
+  if (!blob || (blob.type && !/jpe?g/i.test(blob.type))) return blob;
+  const u8 = new Uint8Array(await blob.arrayBuffer());
+  if (u8.length < 4 || u8[0] !== 0xff || u8[1] !== 0xd8 || hasExif(u8)) return blob;
+  let at = 2;
+  if (u8[2] === 0xff && u8[3] === 0xe0) at = 4 + ((u8[4] << 8) | u8[5]); // keep a JFIF header first
+  return new Blob([u8.subarray(0, at), buildExif(ts, w, h), u8.subarray(at)], { type: 'image/jpeg' });
+}
+
 // ---------------------------------------------------------------- images
 export function canvasBlob(canvas, type = 'image/jpeg', q = 0.92) {
   return new Promise((res) => canvas.toBlob(res, type, q));
