@@ -8,7 +8,7 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const APP_DATE = '2026-10-27';
 
 // Start screen: shows the running version (the one this code is) for a moment, then fades out. A tap skips it.
@@ -242,15 +242,33 @@ function showCamStart(msg, label, fn) {
 }
 const hideCamStart = () => { $('#camStart').hidden = true; };
 
+// A home screen app on iPhone asks for camera permission on every launch, and again whenever the camera has been
+// off for a while. So the camera is switched on once and kept running while you look at other tabs or leave the
+// app briefly; it is switched off only after some minutes away from the camera tab.
+const CAM_IDLE_MS = 5 * 60e3;
+let camStopTimer = 0;
+function scheduleCamStop() {
+  clearTimeout(camStopTimer);
+  camStopTimer = setTimeout(() => { if (S.tab !== 'camera' && $('#sheet').hidden) cam.stop(); }, CAM_IDLE_MS);
+}
+
 async function startCamera() {
   if (S.tab !== 'camera' || !$('#sheet').hidden || document.hidden || !S.pkg) return;
+  clearTimeout(camStopTimer);
   if (S.settings.capture === 'native') {
     cam.stop();
     $('#camLens').replaceChildren();
     showCamStart('기본 카메라로 찍게 설정되어 있어요. 셔터를 누르면 기본 카메라가 열려요.', '기본 카메라 열기', () => shootNative('photo'));
     return;
   }
-  if (cam.active) { hideCamStart(); cam.video.play().catch(() => {}); return; }
+  if (cam.active) {
+    hideCamStart();
+    cam.video.play().catch(() => {});
+    const tr = cam.track;
+    // iOS mutes the camera while the app is in the background; it normally comes back by itself
+    if (tr && tr.muted) setTimeout(() => { if (S.tab === 'camera' && cam.track === tr && tr.muted) { cam.stop(); startCamera(); } }, 1500);
+    return;
+  }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showCamStart('여기서는 앱 카메라를 쓸 수 없어요. 기본 카메라로 찍어 주세요.', '기본 카메라 열기', () => shootNative('photo'));
     return;
@@ -265,7 +283,7 @@ async function startCamera() {
       saveSettings();
       await cam.start();
     }
-    if (S.tab !== 'camera' || !$('#sheet').hidden || document.hidden) { cam.stop(); return; }
+    if (S.tab !== 'camera') scheduleCamStop();
     hideCamStart();
     renderLenses();
   } catch (e) {
@@ -1565,6 +1583,7 @@ async function renderMore() {
     }, l)));
   parts.push(group('촬영 방식',
     el('p', {}, '앱 카메라: 찍자마자 도면이 떠서 빨라요. 기본 카메라: 화질이 가장 좋고 음량 버튼으로 찍을 수 있어요. 영상은 늘 기본 카메라로 찍어요.'),
+    el('p', {}, '앱 카메라는 아이폰이 앱을 열 때마다 카메라 허용을 물어봐요(아이폰이 홈 화면 앱의 허용을 기억하지 않아요). 기본 카메라는 묻지 않아요.'),
     seg));
   const hasSensor = sensors.heading != null;
   parts.push(group('나침반',
@@ -1607,7 +1626,7 @@ function showTab(t) {
   S.tab = t;
   $$('.screen').forEach((s) => s.classList.toggle('on', s.dataset.tab === t));
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
-  if (prev === 'camera' && t !== 'camera') cam.stop();
+  if (prev === 'camera' && t !== 'camera') scheduleCamStop();
   if (t !== 'days' && D.selecting) { D.selecting = false; D.sel.clear(); }
   if (t === 'days' && prev === 'days') S.day = today();
   if (t === 'camera') { renderCamTop(); startCamera(); }
@@ -1712,9 +1731,9 @@ function bindUI() {
   // issues
   $$('#iFilter button').forEach((b) => { b.onclick = () => { S.issueFilter = b.dataset.f; renderIssues(); }; });
   // camera follows the app being shown or hidden
+  // leaving the app for a moment keeps the camera; iOS pauses it and it resumes on return
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) cam.stop();
-    else if (S.tab === 'camera' && $('#sheet').hidden && S.pkg) startCamera();
+    if (!document.hidden && S.tab === 'camera' && $('#sheet').hidden && S.pkg) startCamera();
   });
 }
 

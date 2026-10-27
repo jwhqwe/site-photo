@@ -9,6 +9,7 @@ export class Camera {
     this.lens = '1x';
   }
   get active() { return !!(this.stream && this.stream.active); }
+  get track() { return this.stream ? this.stream.getVideoTracks()[0] || null : null; }
   async start(deviceId) {
     this.stop();
     const base = { width: { ideal: 4032 }, height: { ideal: 3024 } };
