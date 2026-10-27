@@ -8,7 +8,7 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 const APP_DATE = '2026-10-27';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
