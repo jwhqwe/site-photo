@@ -1,8 +1,8 @@
 // Offline shell. Only the app's own code is cached here; drawings and photos stay in IndexedDB.
-const VERSION = 'fieldphoto-60686e511e';
+const VERSION = 'fieldphoto-ea81c7f2d2';
 const SHELL = [
   './', 'index.html', 'app.css', 'manifest.webmanifest',
-  'js/main.js', 'js/ui.js', 'js/util.js', 'js/db.js', 'js/plan.js', 'js/camera.js', 'js/scan.js',
+  'js/main.js', 'js/ui.js', 'js/util.js', 'js/db.js', 'js/plan.js', 'js/camera.js', 'js/scan.js', 'js/todo.js',
   'fonts/Pretendard-Medium.subset.woff2', 'fonts/Pretendard-Bold.subset.woff2', 'fonts/Pretendard-ExtraBold.subset.woff2',
   'vendor/pdf.min.js', 'vendor/pdf.worker.min.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',

@@ -7,9 +7,10 @@ import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openScan, canvasFromBlob } from './scan.js';
+import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.6.2';
+const APP_VERSION = '1.7.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -570,7 +571,7 @@ function openSheet({ mode, item, draftP = null, media = null }) {
   Object.assign(C, {
     open: true, mode, item, draftP, media, saving: false,
     floor: item.floor || S.settings.capFloor,
-    pin: null, members: [], noMember: false, manualDir: null, step: 'pin', ghost: null,
+    pin: null, members: [], noMember: false, manualDir: null, step: 'pin', ghost: null, walked: null,
     issue: !!item.issue, memo: item.memo || '', ready: null,
   });
   if (mode === 'edit') {
@@ -581,8 +582,12 @@ function openSheet({ mode, item, draftP = null, media = null }) {
     const o = S.byId.get(S.fixOf);
     if (o && o.pin) { C.floor = o.floor; C.ghost = setupOf(o); }
   } else {
+    // "그대로" (the last photo's spot) only when you have not walked away: steps counted since that photo,
+    // or, without the motion sensor, only within 20 minutes
     const L = S.lastSetup;
-    if (L && L.floor === C.floor && L.day === item.day && item.ts - L.ts < 2 * 3600e3) C.ghost = { ...L, members: L.members.map((m) => ({ ...m })) };
+    C.walked = L && L.session === sensors.session && L.steps != null && sensors.motionSeen ? sensors.steps - L.steps : null;
+    const stayed = L && (C.walked != null ? C.walked < 6 : item.ts - L.ts < 20 * 60e3);
+    if (L && stayed && L.floor === C.floor && L.day === item.day && item.ts - L.ts < 2 * 3600e3) C.ghost = { ...L, members: L.members.map((m) => ({ ...m })) };
   }
   const img = $('#shThumb');
   if (C.ownThumb && C.thumbUrl) URL.revokeObjectURL(C.thumbUrl);
@@ -703,6 +708,7 @@ function sheetHint() {
       ? '이슈 사진과 같은 자리면 "그대로". 다른 자리면 서 있던 곳을 누르세요.'
       : '지난 사진과 같은 자리면 "그대로". 다른 곳이면 서 있던 곳을 누르세요.';
   }
+  if (!C.pin && C.walked >= 6) return `지난 사진 뒤로 ${C.walked}걸음쯤 걸었어요. 서 있던 곳을 누르세요.`;
   if (!C.pin) return '서 있던 곳을 누르세요. 누른 채로 움직이면 핀이 따라와요.';
   if (C.step === 'pin') return '옮길 곳을 누르세요. 누른 채로 움직이면 핀이 따라와요.';
   if (C.noMember) return '찍은 방향 쪽을 누르세요.' + (C.item.heading != null ? ' 안 누르면 나침반 방향으로 저장돼요.' : '');
@@ -785,7 +791,7 @@ async function finishSheet(later) {
       S.fixOf = null;
     }
     if (mode === 'new' && rec.pin) {
-      S.lastSetup = setupOf(rec);
+      S.lastSetup = { ...setupOf(rec), steps: sensors.motionSeen ? sensors.steps : null, session: sensors.session };
       db.kvSet('lastSetup', S.lastSetup).catch(() => {});
     }
     if (mode !== 'edit') { S.settings.capFloor = C.floor; saveSettings(); }
@@ -1586,7 +1592,7 @@ async function makeBackup() {
     const entries = [];
     const meta = {
       format: 'fieldphoto-backup', version: 1, app: APP_VERSION, created: new Date().toISOString(),
-      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], registers: await db.all('registers'), regItems: await db.all('regItems'),
+      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(),
     };
     entries.push({ name: 'backup.json', text: JSON.stringify(meta) });
     let k = 0;
@@ -1669,6 +1675,7 @@ async function restoreFrom(file) {
     }
     S.settings.lastBackup = Math.max(S.settings.lastBackup || 0, Date.parse(meta.created) || 0);
     if (Array.isArray(meta.inPhotos)) { for (const id of meta.inPhotos) S.shared.add(id); db.kvSet('inPhotos', [...S.shared]).catch(() => {}); }
+    if (Array.isArray(meta.todos)) await restoreTodos(meta.todos);
     saveSettings();
     setItems(await db.all('items'));
   } catch (e) {
@@ -2015,6 +2022,7 @@ function showTab(t) {
   else if (t === 'plan') renderPlanTab();
   else if (t === 'days') renderDays();
   else if (t === 'issues') renderIssues();
+  else if (t === 'todo') { if (prev !== 'todo') showTodoToday(); renderTodos(); }
   else if (t === 'more') renderMore();
 }
 function renderCurrent() {
@@ -2124,6 +2132,7 @@ function bindUI() {
   });
   sensors.onturn = renderCamTurn;
   bindViewerGestures();
+  bindTodos();
 }
 
 function showWelcome() {
@@ -2203,6 +2212,7 @@ async function boot() {
   db.persist();
   S.settings = { ...S.settings, ...((await db.kvGet('settings', {})) || {}) };
   S.lastSetup = await db.kvGet('lastSetup', null);
+  await loadTodos().catch(() => {});
   S.shared = new Set((await db.kvGet('inPhotos', [])) || []);
   setItems(await db.all('items'));
   // a photo whose location step was interrupted is kept as a "위치 없음" photo

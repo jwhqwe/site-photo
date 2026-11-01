@@ -55,7 +55,7 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .empty { color: var(--ink-2); text-align: center; padding: 24px 8px; }
 
 /* tabs: labels in the middle, a rule above each, orange over the current one */
-#tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); column-gap: 4px; background: var(--panel); padding: 0 12px var(--home-b); }
+#tabs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); column-gap: 4px; background: var(--panel); padding: 0 12px var(--home-b); }
 #tabs button { border: 0; background: none; box-shadow: inset 0 2px 0 var(--line); padding-top: 4px; font-size: 13px; font-weight: 700; color: var(--ink-2); }
 #tabs button.on { box-shadow: inset 0 6px 0 var(--accent); color: var(--ink); }
 #tabs b { color: var(--danger); font-weight: 800; margin-left: 3px; }
@@ -300,3 +300,22 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .scan-hint { margin: 0; padding: 10px 16px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--soft); }
 .scan-bottom { display: grid; grid-template-columns: 1fr 1.4fr; gap: 8px; padding: 10px 16px calc(10px + var(--home-b)); }
 .scan-bottom .seg { grid-column: 1 / -1; display: grid; }
+
+/* 할 일 */
+#todoBadge { color: var(--ink-2); }
+.t-count { font-size: 15px; font-weight: 800; }
+.todo-list { border-top: 2px solid var(--line); }
+.todo-list:empty { border-top: 0; }
+.todo { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; column-gap: 6px; border-bottom: 1px solid var(--soft); min-height: 54px; }
+.todo-dot { width: 44px; height: 44px; border: 0; background: none; padding: 0; display: flex; align-items: center; justify-content: center; }
+.todo-dot i { width: 28px; height: 28px; border-radius: 50%; box-shadow: inset 0 0 0 2px var(--ink); background: #fff; color: #fff; font-style: normal; font-size: 15px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+.todo.done .todo-dot i { background: var(--ok); box-shadow: none; }
+.todo.fail .todo-dot i { background: var(--danger); box-shadow: none; }
+.todo.moved .todo-dot i { box-shadow: inset 0 0 0 2px var(--soft); color: var(--ink-2); }
+.todo-txt { border: 0; background: none; text-align: left; padding: 10px 0; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.todo-txt span { font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+.todo.done .todo-txt span, .todo.moved .todo-txt span { color: var(--ink-2); }
+.todo-txt small { font-size: 13px; color: var(--ink-2); font-weight: 500; overflow-wrap: anywhere; white-space: pre-line; }
+.todo-txt .todo-note { color: var(--blue); font-weight: 700; }
+.todo-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
+.todo-help { font-size: 12.5px; color: var(--ink-2); margin: 12px 0 0; line-height: 1.5; }

@@ -131,6 +131,7 @@ export function nativeCapture(kind) {
 // ---------------------------------------------------------------- sensors
 export const sensors = {
   heading: null, headingAcc: null, beta: null, gamma: null, started: false, asked: false, turn: 0, onturn: null,
+  steps: 0, motionSeen: false, session: Math.random().toString(36).slice(2), lp: null, stepUp: false, lastStep: 0,
   start() {
     if (this.started) return;
     this.started = true;
@@ -140,6 +141,7 @@ export const sensors = {
       if (typeof e.beta === 'number') { this.beta = e.beta; this.gamma = e.gamma; this.updateTurn(); }
     };
     window.addEventListener('deviceorientation', onOri);
+    window.addEventListener('devicemotion', (e) => this.onMotion(e));
     window.addEventListener('deviceorientationabsolute', onOri);
   },
   // iOS asks once, from a tap
@@ -155,6 +157,18 @@ export const sensors = {
     } catch (e) { return false; }
     this.start();
     return true;
+  },
+  // walking steps from the accelerometer: the smoothed pull rises over 10.8 m/s² and falls back under 9.6, at most ~3 a second.
+  // Used only to tell "still where the last photo was" from "walked somewhere else".
+  onMotion(e) {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    const m = Math.hypot(a.x, a.y, a.z || 0);
+    this.motionSeen = true;
+    this.lp = this.lp == null ? m : this.lp * 0.75 + m * 0.25;
+    const t = e.timeStamp || Date.now();
+    if (!this.stepUp && this.lp > 10.8 && t - this.lastStep > 300) { this.stepUp = true; this.steps++; this.lastStep = t; }
+    else if (this.stepUp && this.lp < 9.6) this.stepUp = false;
   },
   // how the phone is held: 0 upright, 90 right edge down, 180 upside down, 270 left edge down.
   // Gravity in the screen plane from beta/gamma; lying flat keeps the last answer (shots of the floor).
