@@ -323,3 +323,4 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 /* recording */
 .cam-side .btn.rec { background: var(--danger); color: #fff; box-shadow: var(--key-1); }
 .shutter:disabled { opacity: .35; }
+#pSheetTitle { white-space: pre-line; }

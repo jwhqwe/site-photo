@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -219,6 +219,14 @@ function placeText(it) {
   if (it.doc) return '문서';
   if (!it.pin) return '위치 없음';
   return it.room ? it.room.name : floorLabel(it.floor);
+}
+// a column's size and bars from the column schedule (기둥 일람표) carried in the drawing file, for that floor
+function colSpec(floorKey, mark) {
+  const c = S.pkg && S.pkg.columns && mark ? S.pkg.columns[mark] : null;
+  const r = c && floorKey ? c[floorKey] : null;
+  if (!r) return '';
+  const hoop = r.mid && r.end && r.end !== r.mid ? `대근 ${r.mid} (상·하부 ${r.end})` : r.mid ? `대근 ${r.mid}` : '';
+  return [r.size, r.main ? `주근 ${r.main}` : '', hoop, r.steel ? `철골 ${r.steel}` : ''].filter(Boolean).join(' · ');
 }
 function memberText(it) {
   if (it.noMember) return '부재 없음';
@@ -822,6 +830,7 @@ function renderSheetInfo() {
   const rows = [line(C.ghost ? '지난 위치' : '위치', where)];
   if (st.noMember) rows.push(line('부재', '없음 · 방향만 기록'));
   else rows.push(line('부재', ...(st.members.length ? st.members.map((m) => el('span', { class: 'chipm' }, m.mark || m.type)) : ['도면에서 눌러 고르세요'])));
+  if (!st.noMember) for (const m of st.members) { const t = colSpec(C.floor, m.mark); if (t) rows.push(line('배근', `${m.mark} ${t}`)); }
   const fan = computeFan(st, C.item);
   rows.push(line('방향', fan ? `${bearingText(fan.dir)} · ${SRC[fan.src]}` : '없음', C.item.pitch != null ? ` · 기울기 ${pitchText(C.item.pitch)}` : ''));
   box.replaceChildren(...rows);
@@ -955,6 +964,7 @@ function renderViewerInfo(it) {
     add('위치', it.pin ? (it.room ? it.room.name + (it.room.code && it.room.code !== it.room.name ? ` (${it.room.code})` : '') : '실 밖') : '아직 안 정했어요');
     if (it.pin) add('그리드', it.grid);
     add('부재', it.noMember ? '없음' : memberText(it) || (it.pin ? '안 고름' : ''));
+    if (!it.noMember) for (const m of it.members || []) { const t = colSpec(it.floor, m.mark); if (t) add('배근', `${m.mark} ${t}`); }
     if (it.fan) add('방향', `${bearingText(it.fan.dir)} · ${SRC[it.fan.src] || ''}`);
   }
   if (it.pitch != null) add('기울기', pitchText(it.pitch));
@@ -1548,6 +1558,9 @@ function onPlanTap(p) {
   if (m) {
     list = located.filter((i) => (i.members || []).some((r) => r.id === m.id));
     if (list.length) { title = `${m.mark || m.type} · ${list.length}장`; S.planSel = { floor: fl.key, memberId: m.id }; }
+    const spec = colSpec(fl.key, m.mark);
+    if (spec && !list.length) { S.planSel = null; $('#pSheet').hidden = true; PV.refresh(); toast(`${m.mark} · ${spec}`, 4500); return; }
+    if (spec) title += `\n${spec}`;
   }
   if (!list.length) {
     const tol = 22 * PV.ptPerPx();
