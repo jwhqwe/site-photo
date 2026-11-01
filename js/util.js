@@ -203,17 +203,17 @@ function exifBlock(u8) {
     if (m === 0xe1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) {
       const t = p + 10, end = p + 2 + len, le = u8[t] === 0x49, dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
       const g16 = (o) => dv.getUint16(t + o, le), g32 = (o) => dv.getUint32(t + o, le);
-      let orient = 1, date = false, exifAt = 0;
+      let orient = 1, orientAt = -1, date = false, exifAt = 0;
       const scan = (ifd, fn) => {
         if (!ifd || t + ifd + 2 > end) return;
         const n = g16(ifd);
         for (let i = 0; i < n && t + ifd + 14 + i * 12 <= end; i++) fn(g16(ifd + 2 + i * 12), ifd + 2 + i * 12);
       };
       try {
-        scan(g32(4), (tag, e) => { if (tag === 0x0112) orient = g16(e + 8); else if (tag === 0x8769) exifAt = g32(e + 8); });
+        scan(g32(4), (tag, e) => { if (tag === 0x0112) { orient = g16(e + 8); orientAt = t + e + 8; } else if (tag === 0x8769) exifAt = g32(e + 8); });
         scan(exifAt, (tag) => { if (tag === 0x9003) date = true; });
       } catch (e) { /* a broken block counts as one without a date */ }
-      return { start: p, end, orient, date };
+      return { start: p, end, orient, orientAt, le, date };
     }
     p += 2 + len;
   }
@@ -273,6 +273,37 @@ export async function withExif(blob, ts, w, h) {
   let at = 2;
   if (u8[2] === 0xff && u8[3] === 0xe0) at = 4 + ((u8[4] << 8) | u8[5]); // keep a JFIF header first
   return new Blob([u8.subarray(0, at), buildExif(ts, w, h), u8.subarray(at)], { type: 'image/jpeg' });
+}
+
+// a photo held sideways is turned without touching its pixels: the Exif orientation says how to show it
+const ROT = { 1: 0, 6: 90, 3: 180, 8: 270 }, ORI = { 0: 1, 90: 6, 180: 3, 270: 8 };
+export async function turnJpeg(blob, deg, ts) {
+  if (!deg || !blob) return blob;
+  const u8 = new Uint8Array(await blob.arrayBuffer());
+  if (u8.length < 4 || u8[0] !== 0xff || u8[1] !== 0xd8) return blob;
+  const ex = exifBlock(u8), cur = ex ? ex.orient : 1;
+  if (!(cur in ROT)) return blob; // a mirrored picture is left alone
+  const next = ORI[(ROT[cur] + deg) % 360];
+  if (ex && ex.orientAt >= 0) {
+    const out = u8.slice();
+    if (ex.le) { out[ex.orientAt] = next & 255; out[ex.orientAt + 1] = 0; } else { out[ex.orientAt] = 0; out[ex.orientAt + 1] = next & 255; }
+    return new Blob([out], { type: 'image/jpeg' });
+  }
+  if (ex) return new Blob([u8.subarray(0, ex.start), buildExif(ts, 0, 0, next), u8.subarray(ex.end)], { type: 'image/jpeg' });
+  let at = 2;
+  if (u8[2] === 0xff && u8[3] === 0xe0) at = 4 + ((u8[4] << 8) | u8[5]);
+  return new Blob([u8.subarray(0, at), buildExif(ts, 0, 0, next), u8.subarray(at)], { type: 'image/jpeg' });
+}
+export function turnCanvas(c, deg) {
+  if (!deg) return c;
+  const o = document.createElement('canvas'), side = deg % 180 !== 0;
+  o.width = side ? c.height : c.width; o.height = side ? c.width : c.height;
+  const x = o.getContext('2d');
+  x.translate(o.width / 2, o.height / 2);
+  x.rotate((deg * Math.PI) / 180);
+  x.drawImage(c, -c.width / 2, -c.height / 2);
+  c.width = c.height = 1;
+  return o;
 }
 
 // ---------------------------------------------------------------- video: the shooting time in the movie header

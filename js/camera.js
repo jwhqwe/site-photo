@@ -1,5 +1,5 @@
 // In-app camera (fast: shutter -> drawing -> back), the phone's own camera as a fallback, and the motion sensors.
-import { canvasBlob, thumbFrom, imageThumb } from './util.js';
+import { canvasBlob, thumbFrom, imageThumb, turnJpeg, turnCanvas } from './util.js';
 
 export class Camera {
   constructor(video) {
@@ -60,7 +60,7 @@ export class Camera {
     } catch (e) { return []; }
   }
   // the current frame (the middle part at 2× when the camera cannot zoom itself)
-  captureCanvas() {
+  captureCanvas(turn = 0) {
     const v = this.video;
     const W = v.videoWidth, H = v.videoHeight;
     if (!W || !H) throw new Error('카메라 화면이 아직 준비되지 않았어요');
@@ -68,7 +68,7 @@ export class Camera {
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     c.getContext('2d').drawImage(v, (W - w) / 2, (H - h) / 2, w, h, 0, 0, w, h);
-    return c;
+    return turnCanvas(c, turn);
   }
   // a real photo from the camera's photo pipeline (Safari 18.4+): full size and processed like the Camera app,
   // instead of a still from the live video. At 2× without the camera's own zoom the video frame is used.
@@ -79,16 +79,18 @@ export class Camera {
     const blob = await this.ic.takePhoto();
     return blob && blob.size ? blob : null;
   }
-  async capture() {
+  // turn: degrees clockwise to stand a sideways photo up (from the motion sensor, see sensors.extraTurn)
+  async capture(turn = 0) {
     try {
       let p = await this.takePhoto();
       if (p && !/jpe?g|hei[cf]/i.test(p.type || '')) p = await toJpeg(p); // keep photos as JPEG (date inside)
+      if (p && turn) p = await turnJpeg(p, turn, Date.now());
       if (p) {
         const t = await imageThumb(p);
         if (t.w) return { blob: p, thumb: t.thumb, w: t.w, h: t.h, mime: p.type || 'image/jpeg' };
       }
     } catch (e) { /* the video frame then */ }
-    const c = this.captureCanvas(), w = c.width, h = c.height;
+    const c = this.captureCanvas(turn), w = c.width, h = c.height;
     const blob = await canvasBlob(c, 'image/jpeg', 0.92);
     const thumb = await thumbFrom(c, w, h);
     c.width = c.height = 1;
@@ -128,14 +130,14 @@ export function nativeCapture(kind) {
 
 // ---------------------------------------------------------------- sensors
 export const sensors = {
-  heading: null, headingAcc: null, beta: null, gamma: null, started: false, asked: false,
+  heading: null, headingAcc: null, beta: null, gamma: null, started: false, asked: false, turn: 0, onturn: null,
   start() {
     if (this.started) return;
     this.started = true;
     const onOri = (e) => {
       if (typeof e.webkitCompassHeading === 'number') { this.heading = e.webkitCompassHeading; this.headingAcc = e.webkitCompassAccuracy; }
       else if (e.absolute && typeof e.alpha === 'number') this.heading = (360 - e.alpha) % 360;
-      if (typeof e.beta === 'number') { this.beta = e.beta; this.gamma = e.gamma; }
+      if (typeof e.beta === 'number') { this.beta = e.beta; this.gamma = e.gamma; this.updateTurn(); }
     };
     window.addEventListener('deviceorientation', onOri);
     window.addEventListener('deviceorientationabsolute', onOri);
@@ -153,6 +155,23 @@ export const sensors = {
     } catch (e) { return false; }
     this.start();
     return true;
+  },
+  // how the phone is held: 0 upright, 90 right edge down, 180 upside down, 270 left edge down.
+  // Gravity in the screen plane from beta/gamma; lying flat keeps the last answer (shots of the floor).
+  updateTurn() {
+    const b = (this.beta * Math.PI) / 180, g = ((this.gamma || 0) * Math.PI) / 180;
+    const gx = Math.sin(g) * Math.cos(b), gy = -Math.sin(b);
+    if (Math.hypot(gx, gy) < 0.5) return;
+    let t = this.turn;
+    if (Math.abs(gx) > Math.abs(gy) * 1.4) t = gx > 0 ? 90 : 270;
+    else if (Math.abs(gy) > Math.abs(gx) * 1.4) t = gy < 0 ? 0 : 180;
+    if (t !== this.turn) { this.turn = t; if (this.onturn) this.onturn(t); }
+  },
+  // the turn still needed: when the screen itself turned to landscape the camera already delivers it upright
+  extraTurn() {
+    const uiLandscape = window.innerWidth > window.innerHeight;
+    if (uiLandscape) return 0;
+    return this.turn;
   },
   // camera axis above the horizon, degrees (+ looking up, - looking down)
   pitch() {

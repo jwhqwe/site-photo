@@ -1,7 +1,7 @@
 // 현장 사진 — app logic. Drawings, photos and records live only in this phone's storage (IndexedDB).
 import {
   $, $$, el, uid, dayOf, today, yymmdd, timeOf, dayLabel, addDays, extOf, computeNames, csv,
-  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
+  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
 } from './util.js';
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
@@ -9,7 +9,7 @@ import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN
 import { openScan, canvasFromBlob } from './scan.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.6.2';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -325,8 +325,17 @@ async function pickLens(o) {
   renderLenses();
 }
 
+// a small sign on the viewfinder when the photo will be saved turned (phone held sideways)
+function renderCamTurn() {
+  const t = $('#camTurn');
+  if (!t) return;
+  const k = sensors.extraTurn();
+  t.hidden = !k;
+  t.textContent = k === 180 ? '거꾸로 → 바로 세워 저장' : '가로로 저장';
+}
 function renderCamTop() {
   $('#camFloor').textContent = floorLabel(S.settings.capFloor) || '층 선택';
+  renderCamTurn();
   renderCamBanner();
   renderCamLast();
 }
@@ -342,7 +351,7 @@ function renderCamBanner() {
   const b = $('#camBanner');
   if (S.mode === 'tbm') {
     b.className = 'cam-banner tbm';
-    b.replaceChildren(el('span', {}, `TBM 사진 찍는 중 · 오늘 ${S.tbmCount}장`), el('button', { onclick: endTbm }, '끝'));
+    b.replaceChildren(el('span', {}, `TBM 사진 찍는 중 · 오늘 ${S.tbmCount}장`), el('button', { onclick: endTbm }, 'TBM 끝내기 ✕'));
     b.hidden = false;
   } else if (S.mode === 'fix') {
     const o = S.byId.get(S.fixOf);
@@ -358,8 +367,9 @@ async function onShutter() {
   if (camBusy) return;
   if (S.scan) {
     let c = null;
-    try { const p = await cam.takePhoto(); if (p) c = await canvasFromBlob(p); } catch (e) { c = null; }
-    try { if (!c) c = cam.captureCanvas(); } catch (e) { toast((e && e.message) || '찍지 못했어요'); return; }
+    const turn = sensors.extraTurn();
+    try { let p = await cam.takePhoto(); if (p && turn) p = await turnJpeg(p, turn, Date.now()); if (p) c = await canvasFromBlob(p); } catch (e) { c = null; }
+    try { if (!c) c = cam.captureCanvas(turn); } catch (e) { toast((e && e.message) || '찍지 못했어요'); return; }
     await scanAndSave(c);
     return;
   }
@@ -367,7 +377,7 @@ async function onShutter() {
   const btn = $('#camShutter');
   btn.classList.add('working');
   try {
-    const r = await cam.capture();
+    const r = await cam.capture(sensors.extraTurn());
     try { cam.video.animate([{ opacity: 0.25 }, { opacity: 1 }], { duration: 200 }); } catch (e) { /* no animation */ }
     await onCaptured({ ...r, kind: 'photo', lens: cam.lens });
   } catch (e) { toast((e && e.message) || '찍지 못했어요'); }
@@ -826,6 +836,7 @@ async function renderViewer(full) {
     V.out = null;
     const media = $('#vMedia');
     media.replaceChildren();
+    VZ.s = 1; VZ.x = VZ.y = 0; VZ.pts.clear(); VZ.one = VZ.two = null;
     const f = await db.get('files', it.id).catch(() => null);
     if (!V.item || V.item.id !== it.id) return;
     if (f && f.blob) {
@@ -835,10 +846,12 @@ async function renderViewer(full) {
       media.append(it.kind === 'video'
         ? el('video', { src: V.url, controls: true, playsinline: true, preload: 'metadata' })
         : el('div', { class: 'v-photo' }, el('img', {
-          src: V.url, alt: nameOf(it), onload: (e) => fitPhoto(e.target),
+          src: V.url, alt: nameOf(it), draggable: 'false', onload: (e) => fitPhoto(e.target),
           onerror: (e) => e.target.parentNode.replaceWith(el('p', { class: 'empty' }, '사진 파일을 읽지 못했어요')),
         })));
     } else media.append(el('p', { class: 'empty' }, '파일을 찾지 못했어요'));
+    const list = dayList(it), k = list.findIndex((i) => i.id === it.id);
+    if (list.length > 1) media.append(el('span', { class: 'v-pos' }, `${k + 1} / ${list.length}`));
   }
   renderViewerInfo(it);
   renderViewerActions(it);
@@ -904,6 +917,94 @@ function viewerCtx(it) {
       pinMark(g, it.pin, px, 'pin');
     },
   };
+}
+// ---------------------------------------------------------------- viewer: slide to the next photo of the day, pinch or double-tap to zoom
+const VZ = { s: 1, x: 0, y: 0, pts: new Map(), one: null, two: null, lastTap: 0 };
+const dayList = (it) => vis().filter((i) => i.day === it.day && !i.draft).sort((a, b) => a.ts - b.ts);
+function viewerStep(dir) {
+  if (!V.item) return false;
+  const list = dayList(V.item), k = list.findIndex((i) => i.id === V.item.id), t = list[k + dir];
+  if (!t) return false;
+  openViewer(t.id);
+  return true;
+}
+const zoomImg = () => $('#vMedia .v-photo img');
+function applyZoom() {
+  const img = zoomImg();
+  if (!img) return;
+  const wrap = img.parentNode, W = wrap.clientWidth, H = wrap.clientHeight;
+  VZ.s = Math.max(1, Math.min(5, VZ.s));
+  VZ.x = Math.min(0, Math.max(W - W * VZ.s, VZ.x)); // the picture keeps covering its box
+  VZ.y = Math.min(0, Math.max(H - H * VZ.s, VZ.y));
+  if (VZ.s === 1) VZ.x = VZ.y = 0;
+  img.style.transformOrigin = '0 0';
+  img.style.transform = VZ.s === 1 ? '' : `translate(${VZ.x}px, ${VZ.y}px) scale(${VZ.s})`;
+  wrap.classList.toggle('zoomed', VZ.s > 1);
+}
+function bindViewerGestures() {
+  const host = $('#vMedia');
+  const box = () => (zoomImg() ? zoomImg().parentNode : host).getBoundingClientRect();
+  host.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.memo-on, video') || !zoomImg()) return;
+    VZ.pts.set(e.pointerId, [e.clientX, e.clientY]);
+    try { host.setPointerCapture(e.pointerId); } catch (err) { /* fine without */ }
+    if (VZ.pts.size === 1) VZ.one = { x0: e.clientX, y0: e.clientY, tx: VZ.x, ty: VZ.y, t: e.timeStamp, moved: false };
+    else if (VZ.pts.size === 2) {
+      const [a, b] = [...VZ.pts.values()], r = box();
+      VZ.two = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, s: VZ.s, cx: (a[0] + b[0]) / 2 - r.left, cy: (a[1] + b[1]) / 2 - r.top, tx: VZ.x, ty: VZ.y };
+      VZ.one = null;
+    }
+  });
+  host.addEventListener('pointermove', (e) => {
+    if (!VZ.pts.has(e.pointerId)) return;
+    VZ.pts.set(e.pointerId, [e.clientX, e.clientY]);
+    const img = zoomImg();
+    if (!img) return;
+    if (VZ.two && VZ.pts.size >= 2) {
+      const [a, b] = [...VZ.pts.values()], T = VZ.two;
+      const s = Math.max(1, Math.min(5, (T.s * Math.hypot(a[0] - b[0], a[1] - b[1])) / T.d)), k = s / T.s;
+      VZ.s = s; VZ.x = T.cx - (T.cx - T.tx) * k; VZ.y = T.cy - (T.cy - T.ty) * k;
+      applyZoom();
+      return;
+    }
+    const o = VZ.one;
+    if (!o) return;
+    const dx = e.clientX - o.x0, dy = e.clientY - o.y0;
+    if (Math.hypot(dx, dy) > 8) o.moved = true;
+    if (VZ.s > 1) { VZ.x = o.tx + dx; VZ.y = o.ty + dy; applyZoom(); return; }
+    if (Math.abs(dx) > Math.abs(dy)) img.style.transform = `translateX(${dx}px)`; // the picture follows the finger
+  });
+  host.addEventListener('pointerup', (e) => {
+    if (!VZ.pts.has(e.pointerId)) return;
+    VZ.pts.delete(e.pointerId);
+    if (VZ.two) { if (VZ.pts.size < 2) VZ.two = null; return; }
+    const o = VZ.one, img = zoomImg();
+    VZ.one = null;
+    if (!o || !img) return;
+    const dx = e.clientX - o.x0, dy = e.clientY - o.y0;
+    if (VZ.s === 1) {
+      img.style.transform = '';
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+        if (!viewerStep(dx < 0 ? 1 : -1)) toast(dx < 0 ? '이날 마지막 사진이에요' : '이날 첫 사진이에요');
+        return;
+      }
+    }
+    if (!o.moved && e.timeStamp - o.t < 300) {
+      if (e.timeStamp - VZ.lastTap < 320) { // double tap: zoom in where tapped, or back out
+        VZ.lastTap = 0;
+        const r = box(), px = e.clientX - r.left, py = e.clientY - r.top;
+        if (VZ.s > 1) VZ.s = 1;
+        else { const k = 2.5; VZ.x = px - px * k; VZ.y = py - py * k; VZ.s = k; }
+        applyZoom();
+      } else VZ.lastTap = e.timeStamp;
+    }
+  });
+  host.addEventListener('pointercancel', (e) => {
+    VZ.pts.delete(e.pointerId);
+    VZ.one = VZ.two = null;
+    const img = zoomImg();
+    if (img && VZ.s === 1) img.style.transform = '';
+  });
 }
 function closeViewer() {
   $('#viewer').hidden = true;
@@ -1906,6 +2007,8 @@ function showTab(t) {
   $$('.screen').forEach((s) => s.classList.toggle('on', s.dataset.tab === t));
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
   if (prev === 'camera' && t !== 'camera') scheduleCamStop();
+  // TBM shots are taken in one go: leaving the camera ends TBM mode, so it does not greet you next time
+  if (t !== 'camera' && S.mode === 'tbm') { S.mode = 'normal'; renderCamBanner(); }
   if (t !== 'days' && D.selecting) { D.selecting = false; D.sel.clear(); }
   if (t === 'days' && prev === 'days') S.day = today();
   if (t === 'camera') { renderCamTop(); startCamera(); }
@@ -2012,9 +2115,15 @@ function bindUI() {
   $$('#iFilter button').forEach((b) => { b.onclick = () => { S.issueFilter = b.dataset.f; renderIssues(); }; });
   // camera follows the app being shown or hidden
   // leaving the app for a moment keeps the camera; iOS pauses it and it resumes on return
+  let hiddenAt = 0;
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && S.tab === 'camera' && $('#sheet').hidden && S.pkg) startCamera();
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    // back after a while (or on another day): TBM mode is over
+    if (S.mode === 'tbm' && (Date.now() - hiddenAt > 10 * 60e3 || dayOf(hiddenAt) !== today())) { S.mode = 'normal'; renderCamBanner(); }
+    if (S.tab === 'camera' && $('#sheet').hidden && S.pkg) startCamera();
   });
+  sensors.onturn = renderCamTurn;
+  bindViewerGestures();
 }
 
 function showWelcome() {
