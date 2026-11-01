@@ -1,16 +1,17 @@
 // 현장 사진 — app logic. Drawings, photos and records live only in this phone's storage (IndexedDB).
 import {
   $, $$, el, uid, dayOf, today, yymmdd, timeOf, dayLabel, addDays, extOf, computeNames, csv,
-  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
+  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, turnMovie, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
 } from './util.js';
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openScan, canvasFromBlob } from './scan.js';
+import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -70,12 +71,15 @@ function remember(it) {
   S.names = null;
 }
 async function putItem(it, blob, thumb) {
+  it.mt = Date.now(); // last change, for sending only what is new to another device
   await db.saveItem(it, blob || null, thumb || null);
   remember(it);
   return it;
 }
 async function putRecords(list) {
   if (!list.length) return;
+  const now = Date.now();
+  for (const it of list) it.mt = now;
   await db.putMany('items', list);
   for (const it of list) remember(it);
 }
@@ -439,6 +443,80 @@ async function onCaptured(media) {
   const draftP = putItem(it, media.blob, media.thumb);
   draftP.catch(() => {});
   openSheet({ mode: S.mode === 'fix' ? 'fix' : 'new', item: it, draftP, media });
+}
+
+// video: recorded in the app (sharp); the phone camera only when the app camera is off or cannot record
+const REC = { timer: 0, turn: 0, lens: '1x' };
+const mmss = (ms) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+function renderRec() {
+  const on = cam.recording, b = $('#camVideoBtn');
+  b.textContent = on ? `■ 멈추기 ${mmss(Date.now() - cam.recAt)}` : '영상';
+  b.classList.toggle('rec', on);
+  $('#camShutter').disabled = on;
+}
+async function toggleRecord() {
+  if (cam.recording) { await finishRecording(); return; }
+  if (S.settings.capture === 'native' || !cam.active || typeof MediaRecorder !== 'function') { shootNative('video'); return; }
+  if (camBusy) return;
+  if (!sensors.asked) sensors.requestPermission();
+  try { await cam.startRecording(); }
+  catch (e) { toast((e && e.message) || '녹화를 시작하지 못했어요'); return; }
+  REC.turn = sensors.extraTurn();
+  REC.lens = cam.lens;
+  renderRec();
+  REC.timer = setInterval(renderRec, 500);
+}
+async function finishRecording() {
+  clearInterval(REC.timer);
+  const b = busy('영상을 저장하는 중…');
+  let blob = null, t = { thumb: null, w: 0, h: 0 };
+  try {
+    blob = await cam.stopRecording();
+    if (blob && REC.turn) blob = await turnMovie(blob, REC.turn);
+    if (blob) t = await videoThumb(blob);
+  } catch (e) { /* told below */ } finally { b.done(); renderRec(); }
+  if (!blob) { toast('영상을 저장하지 못했어요'); return; }
+  await onCaptured({ blob, thumb: t.thumb, w: t.w, h: t.h, mime: blob.type || 'video/mp4', kind: 'video', lens: REC.lens });
+}
+
+// 사진대지: chosen photos on A4 pages with 일시·위치·부재·내용, as a PDF
+function reportRows(it) {
+  const d = new Date(it.ts), p2 = (n) => String(n).padStart(2, '0');
+  const where = it.tbm ? 'TBM' : it.doc ? '문서' : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid].filter(Boolean).join(' · ') || '위치 없음';
+  const what = it.tbm || it.doc ? '' : it.noMember ? '부재 없음' : memberText(it);
+  const note = [it.issue ? issueText(it) : '', it.fixOf ? '조치 후' : '', it.memo || ''].filter(Boolean).join(' · ');
+  return [['일시', `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())} ${timeOf(it.ts)}`], ['위치', where], ['부재', what || '-'], ['내용', note || '-']];
+}
+async function makeReport(list) {
+  list = list.filter((i) => i && i.kind === 'photo' && !i.draft).sort((a, b) => a.ts - b.ts);
+  if (!list.length) { toast('사진을 골라 주세요 (영상은 빠져요)'); return; }
+  let per = 2, title = '공사 사진대지';
+  const go = await openDialog((box, close) => {
+    const t = el('input', { value: title, 'aria-label': '제목' });
+    const seg = el('div', { class: 'seg' }, ...[2, 3].map((n) => el('button', {
+      'aria-pressed': String(per === n),
+      onclick: () => { per = n; [...seg.children].forEach((b, i) => b.setAttribute('aria-pressed', String(i + 2 === per))); },
+    }, `한 쪽에 ${n}장`)));
+    box.append(el('h3', {}, `사진대지 · 사진 ${list.length}장`),
+      el('p', {}, 'A4에 사진과 일시·위치·부재·내용 칸을 넣어 PDF로 만들어요. 위치·부재는 붙인 기록에서, 내용은 이슈와 메모에서 가져와요.'),
+      t, seg,
+      el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close(false) }, '닫기'),
+        el('button', { class: 'btn primary', onclick: () => { title = t.value.trim() || title; close(true); } }, '만들기')));
+  });
+  if (!go) return;
+  const b = busy('사진대지 만드는 중…');
+  try {
+    const entries = [];
+    for (const it of list) { const f = await db.get('files', it.id); if (f && f.blob) entries.push({ blob: f.blob, rows: reportRows(it) }); }
+    const pdf = await photoSheetPdf(entries, { title, perPage: per, onProgress: (i, n) => b.set(`사진대지 만드는 중… ${i}/${n}쪽`) });
+    b.done();
+    await offerFile(pdf, `사진대지_${yymmdd(list[0].day)}.pdf`, '사진대지 준비 완료',
+      `${Math.ceil(entries.length / per)}쪽 · ${fmtBytes(pdf.size)}
+"파일에 저장"하거나 메신저·메일로 보내세요.`);
+  } catch (e) {
+    b.done();
+    alertBox('사진대지를 만들지 못했어요', (e && e.message) || String(e));
+  }
 }
 
 // document scan: the page is found, flattened and cleaned, then kept without a drawing location (날짜_문서_번호)
@@ -1214,7 +1292,7 @@ function renderSelBar() {
   $('#dSelBar').hidden = !D.selecting;
   $('#scr-days').classList.toggle('selecting', D.selecting);
   $('#dSelCount').textContent = `${D.sel.size}개`;
-  for (const id of ['dSelMemo', 'dSelShare', 'dSelExport', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
+  for (const id of ['dSelMemo', 'dSelShare', 'dSelReport', 'dSelExport', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
 }
 // ---------------------------------------------------------------- drag to select (day page)
 // In 선택 mode, slide sideways across photos to select them; moving up or down then takes whole rows, like the
@@ -1585,10 +1663,13 @@ async function exportRange() {
   if (r) exportItems(r);
 }
 
-async function makeBackup() {
-  const b = busy('백업 파일 만드는 중…');
+// send = only what was taken or changed since the last send, without the drawings: for another device (iPad) by AirDrop
+async function makeBackup(send = false) {
+  const since = S.settings.lastSent || 0;
+  const items = send ? vis().filter((i) => (i.mt || i.ts) > since) : vis();
+  if (send && !items.length) { toast('지난번에 보낸 뒤로 새로 찍거나 고친 사진이 없어요', 2600); return; }
+  const b = busy(send ? '보낼 파일 만드는 중…' : '백업 파일 만드는 중…');
   try {
-    const items = vis();
     const entries = [];
     const meta = {
       format: 'fieldphoto-backup', version: 1, app: APP_VERSION, created: new Date().toISOString(),
@@ -1603,7 +1684,7 @@ async function makeBackup() {
       if (t) entries.push({ name: `thumbs/${it.id}.jpg`, blob: t.blob, date: new Date(it.ts) });
       if (++k % 20 === 0) b.set(`백업 준비 중… ${k}/${items.length}`);
     }
-    if (S.pkg) {
+    if (S.pkg && !send) {
       const fls = [];
       for (const f of S.floors) {
         const r = await getFloor(f.key);
@@ -1619,9 +1700,16 @@ async function makeBackup() {
     }
     const zip = await makeZip(entries, (i, n) => b.set(`백업 묶는 중… ${i}/${n}`));
     b.done();
-    const r = await offerFile(zip, `현장사진_백업_${yymmdd(today())}.zip`, '백업 파일 준비 완료',
-      `사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}\n"파일에 저장"으로 폰이나 PC에 보관하세요.`);
-    if (r === 'shared' || r === 'downloaded') {
+    const hm = timeOf(Date.now()).replace(':', '');
+    const r = send
+      ? await offerFile(zip, `현장사진_보내기_${yymmdd(today())}_${hm}.zip`, '보낼 파일 준비 완료',
+        `새로 찍거나 고친 사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}\nAirDrop으로 아이패드에 보내고, 아이패드 앱의 더보기 → '백업에서 복원'으로 넣으세요. 도면은 빠져 있어요(아이패드에 먼저 넣어 두세요).`)
+      : await offerFile(zip, `현장사진_백업_${yymmdd(today())}.zip`, '백업 파일 준비 완료',
+        `사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}\n"파일에 저장"으로 폰이나 PC에 보관하세요.`);
+    if ((r === 'shared' || r === 'downloaded') && send) {
+      S.settings.lastSent = Date.now();
+      saveSettings();
+    } else if (r === 'shared' || r === 'downloaded') {
       S.settings.lastBackup = Date.now();
       saveSettings();
       renderCurrent();
@@ -1978,8 +2066,13 @@ async function renderMore() {
   parts.push(group('백업',
     el('p', {}, last ? `마지막 백업 ${dayLabel(dayOf(last))} ${timeOf(last)}` : '아직 백업한 적이 없어요.'),
     el('p', {}, '사진·기록·도면을 ZIP 하나로 묶어요. 폰을 바꾸거나 앱을 지울 때 이 파일로 되살려요.'),
-    btns(btn('백업 파일 만들기', makeBackup, 'primary'),
+    btns(btn('백업 파일 만들기', () => makeBackup(), 'primary'),
       btn('백업에서 복원', async () => { const [f] = await pickFiles({ accept: '.zip,application/zip' }); if (f && (await restoreFrom(f))) renderCurrent(); }))));
+  const sent = S.settings.lastSent;
+  parts.push(group('아이패드로 보내기',
+    el('p', {}, '실시간으로 맞추려면 사진이 인터넷 서버를 거쳐야 해서 이 앱에서는 하지 않아요. 대신 지난번에 보낸 뒤로 새로 찍거나 고친 것만 묶어 AirDrop으로 보내고, 아이패드에서 복원하면 합쳐져요.'),
+    el('p', {}, sent ? `마지막으로 보낸 때 ${dayLabel(dayOf(sent))} ${timeOf(sent)}` : '아직 보낸 적이 없어요.'),
+    btns(btn('새 것만 보내기', () => makeBackup(true)))));
   const storage = el('p', {}, '확인 중…');
   parts.push(group('저장 공간', el('p', {}, `사진·영상 ${items.length}개`), storage));
   parts.push(group('지우기',
@@ -2016,6 +2109,7 @@ function showTab(t) {
   if (prev === 'camera' && t !== 'camera') scheduleCamStop();
   // TBM shots are taken in one go: leaving the camera ends TBM mode, so it does not greet you next time
   if (t !== 'camera' && S.mode === 'tbm') { S.mode = 'normal'; renderCamBanner(); }
+  if (t !== 'camera' && cam.recording) finishRecording(); // leaving the camera ends the video
   if (t !== 'days' && D.selecting) { D.selecting = false; D.sel.clear(); }
   if (t === 'days' && prev === 'days') S.day = today();
   if (t === 'camera') { renderCamTop(); startCamera(); }
@@ -2046,7 +2140,7 @@ function bindUI() {
   // camera
   $('#camShutter').onclick = onShutter;
   $('#camNative').onclick = () => shootNative('photo');
-  $('#camVideoBtn').onclick = () => shootNative('video');
+  $('#camVideoBtn').onclick = () => toggleRecord();
   $('#camScan').onclick = () => { S.scan = !S.scan; renderCamScan(); if (S.scan) toast('종이 전체가 보이게 찍어 주세요'); };
   $('#camFloor').onclick = async () => {
     const k = await chooseFloor(S.settings.capFloor);
@@ -2102,6 +2196,7 @@ function bindUI() {
     await putRecords(sel.map((i) => ({ ...i, ...memoPatch(i, t) })));
     renderDays();
   };
+  $('#dSelReport').onclick = () => makeReport([...D.sel].map((id) => S.byId.get(id)));
   $('#dSelExport').onclick = () => exportItems([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
   $('#dSelShare').onclick = () => shareBatch([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
   bindDragSelect();

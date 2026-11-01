@@ -59,6 +59,45 @@ export class Camera {
       return out.sort((a, b) => parseFloat(a.zoom) - parseFloat(b.zoom));
     } catch (e) { return []; }
   }
+  get recording() { return !!(this.rec && this.rec.state !== 'inactive'); }
+  // video in the app: the camera's own stream recorded at a high bitrate. The phone camera through the file picker
+  // hands back a shrunken copy ("compressing video"), which is why videos looked so poor.
+  async startRecording() {
+    const tr = this.track;
+    if (!tr || typeof MediaRecorder !== 'function') throw new Error('여기서는 앱에서 영상을 찍을 수 없어요');
+    // 1080p for video: 4032×3024 photo frames are more than the video encoder takes
+    try { await tr.applyConstraints({ width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }); } catch (e) { /* keep the current size */ }
+    if (this.zoom > 1) await this.setZoom(this.zoom).catch(() => {});
+    let mic = null;
+    try { mic = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { mic = null; } // no sound if the microphone is refused
+    const stream = new MediaStream([tr, ...(mic ? mic.getAudioTracks() : [])]);
+    const mime = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    const s = tr.getSettings ? tr.getSettings() : {};
+    const big = (s.width || 1920) * (s.height || 1080) > 2.5e6;
+    this.rec = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: big ? 24e6 : 12e6, audioBitsPerSecond: 128000 });
+    this.chunks = [];
+    this.rec.ondataavailable = (e) => { if (e.data && e.data.size) this.chunks.push(e.data); };
+    this.mic = mic;
+    this.recAt = Date.now();
+    this.rec.start(1000);
+  }
+  stopRecording() {
+    return new Promise((resolve) => {
+      const rec = this.rec;
+      if (!rec || rec.state === 'inactive') { resolve(null); return; }
+      rec.onstop = async () => {
+        const blob = new Blob(this.chunks, { type: (rec.mimeType || 'video/mp4').split(';')[0] });
+        this.chunks = [];
+        this.rec = null;
+        if (this.mic) { for (const t of this.mic.getTracks()) t.stop(); this.mic = null; }
+        const tr = this.track;
+        try { if (tr) await tr.applyConstraints({ width: { ideal: 4032 }, height: { ideal: 3024 } }); } catch (e) { /* stays at video size */ }
+        if (this.zoom > 1) await this.setZoom(this.zoom).catch(() => {});
+        resolve(blob.size ? blob : null);
+      };
+      rec.stop();
+    });
+  }
   // the current frame (the middle part at 2× when the camera cannot zoom itself)
   captureCanvas(turn = 0) {
     const v = this.video;

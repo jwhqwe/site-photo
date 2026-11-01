@@ -331,6 +331,42 @@ function fillMovieTimes(dv, p, end, secs) {
   }
   return n;
 }
+// a video held sideways is turned by the track's display matrix (players and the Photos app follow it)
+const MATRIX = { 90: [0, 65536, 0, -65536, 0, 0], 180: [-65536, 0, 0, 0, -65536, 0], 270: [0, -65536, 0, 65536, 0, 0] };
+function turnTracks(dv, p, end, m) {
+  let n = 0;
+  for (let b; (b = movieBox(dv, p, end)); p += b.size) {
+    if (b.type === 'trak') n += turnTracks(dv, p + b.hl, p + b.size, m);
+    else if (b.type === 'tkhd') {
+      const q = p + b.hl, at = q + (dv.getUint8(q) === 1 ? 48 : 40);
+      if (!dv.getUint32(at + 36) || !dv.getUint32(at + 40)) continue; // sound track: no picture size
+      m.forEach((v, i) => dv.setInt32(at + i * 4, v));
+      dv.setInt32(at + 24, 0); dv.setInt32(at + 28, 0); dv.setInt32(at + 32, 1 << 30);
+      n++;
+    }
+  }
+  return n;
+}
+export async function turnMovie(blob, deg) {
+  const m = MATRIX[deg];
+  if (!m || !blob || blob.size < 16) return blob;
+  let p = 0;
+  for (let i = 0; i < 64 && p + 8 <= blob.size; i++) {
+    const h = new DataView(await blob.slice(p, p + 16).arrayBuffer());
+    let size = h.getUint32(0), hl = 8;
+    const type = String.fromCharCode(h.getUint8(4), h.getUint8(5), h.getUint8(6), h.getUint8(7));
+    if (size === 1 && h.byteLength >= 16) { size = Number(h.getBigUint64(8)); hl = 16; } else if (size === 0) size = blob.size - p;
+    if (size < hl) break;
+    if (type === 'moov') {
+      if (size > 32e6 || p + size > blob.size) break;
+      const buf = await blob.slice(p, p + size).arrayBuffer();
+      if (!turnTracks(new DataView(buf), hl, size, m)) return blob;
+      return new Blob([blob.slice(0, p), buf, blob.slice(p + size)], { type: blob.type || 'video/mp4' });
+    }
+    p += size;
+  }
+  return blob;
+}
 export async function withMovieTime(blob, ts) {
   if (!blob || blob.size < 16) return blob;
   let p = 0;

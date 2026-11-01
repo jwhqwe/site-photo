@@ -319,3 +319,7 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .todo-txt .todo-note { color: var(--blue); font-weight: 700; }
 .todo-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
 .todo-help { font-size: 12.5px; color: var(--ink-2); margin: 12px 0 0; line-height: 1.5; }
+
+/* recording */
+.cam-side .btn.rec { background: var(--danger); color: #fff; box-shadow: var(--key-1); }
+.shutter:disabled { opacity: .35; }
