@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="현장사진">
-<meta name="theme-color" content="#111111">
+<meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
@@ -18,7 +18,7 @@
 <div id="splash" class="splash" role="status" aria-live="polite">
   <img src="icons/icon-192.png" alt="" width="92" height="92">
   <h1>현장 사진</h1>
-  <p id="splashVer">버전 1.5.0 · 2026-11-01</p>
+  <p id="splashVer">버전 1.6.0 · 2026-11-01</p>
   <div class="splash-bar"><span></span></div>
   <small class="splash-tip">화면을 누르면 바로 시작해요</small>
 </div>
@@ -26,23 +26,28 @@
   <main id="screens">
 
     <!-- 촬영 -->
-    <section id="scr-camera" class="screen dark" data-tab="camera">
-      <video id="camVideo" playsinline muted autoplay></video>
-      <div class="cam-top">
-        <button id="camFloor" class="chip dark-chip">층 선택</button>
+    <section id="scr-camera" class="screen cam" data-tab="camera">
+      <div class="cam-view">
+        <video id="camVideo" playsinline muted autoplay></video>
+        <div class="cam-top">
+          <button id="camFloor" class="chip dark-chip">층 선택</button>
+          <button id="camScan" class="chip dark-chip" aria-pressed="false">문서 스캔</button>
+        </div>
+        <div id="camBanner" class="cam-banner" hidden></div>
+        <div id="camStart" class="cam-start" hidden>
+          <p id="camStartMsg">카메라를 켜려면 아래 버튼을 눌러 주세요.</p>
+          <button id="camStartBtn" class="btn primary big">카메라 켜기</button>
+        </div>
+      </div>
+      <div class="cam-deck">
         <div id="camLens" class="lens"></div>
-      </div>
-      <div id="camBanner" class="cam-banner" hidden></div>
-      <div id="camStart" class="cam-start" hidden>
-        <p id="camStartMsg">카메라를 켜려면 아래 버튼을 눌러 주세요.</p>
-        <button id="camStartBtn" class="btn primary big">카메라 켜기</button>
-      </div>
-      <div class="cam-bottom">
-        <button id="camLast" class="cam-last" aria-label="마지막 사진"></button>
-        <button id="camShutter" class="shutter" aria-label="촬영"><span></span></button>
-        <div class="cam-side">
-          <button id="camNative" class="side-btn">기본<br>카메라</button>
-          <button id="camVideoBtn" class="side-btn">영상</button>
+        <div class="cam-bottom">
+          <button id="camLast" class="cam-last" aria-label="마지막 사진"></button>
+          <button id="camShutter" class="shutter" aria-label="촬영"><span></span></button>
+          <div class="cam-side">
+            <button id="camNative" class="btn small">기본 카메라</button>
+            <button id="camVideoBtn" class="btn small">영상</button>
+          </div>
         </div>
       </div>
     </section>
@@ -105,11 +110,11 @@
   </main>
 
   <nav id="tabs">
-    <button data-tab="camera"><i>◉</i>촬영</button>
-    <button data-tab="plan"><i>▦</i>도면</button>
-    <button data-tab="days"><i>▤</i>날짜</button>
-    <button data-tab="issues"><i>!</i>이슈<b id="issueBadge" hidden></b></button>
-    <button data-tab="more"><i>⋯</i>더보기</button>
+    <button data-tab="camera">촬영</button>
+    <button data-tab="plan">도면</button>
+    <button data-tab="days">날짜</button>
+    <button data-tab="issues">이슈<b id="issueBadge" hidden></b></button>
+    <button data-tab="more">더보기</button>
   </nav>
 </div>
 
@@ -141,7 +146,7 @@
   <div class="v-top">
     <button id="vClose" class="icon-btn" aria-label="닫기">✕</button>
     <div id="vTitle" class="v-title"></div>
-    <button id="vDelete" class="icon-btn" aria-label="삭제">🗑</button>
+    <button id="vDelete" class="icon-btn" aria-label="삭제"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
   </div>
   <div class="v-scroll">
     <div id="vMedia" class="v-media"></div>

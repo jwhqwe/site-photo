@@ -6,9 +6,10 @@ import {
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
+import { openScan, canvasFromBlob } from './scan.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -38,9 +39,9 @@ const PDF_ID = '__pdf';
 const S = {
   pkg: null, floors: [], floorCache: new Map(),
   items: [], byId: new Map(), names: null,
-  settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null, zoom: 1 },
+  settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null, zoom: 1, tbmName: '건축' },
   tab: null, day: today(), planFloor: null, planSel: null, issueFilter: 'open',
-  mode: 'normal', fixOf: null, tbmCount: 0,
+  mode: 'normal', fixOf: null, tbmCount: 0, scan: false,
   lastSetup: null, swReg: null,
   shared: new Set(), // ids already shared or zipped out of the app (kept apart from the records so a save never races it)
 };
@@ -59,7 +60,7 @@ function setItems(list) {
   S.byId = new Map(S.items.map((i) => [i.id, i]));
   S.names = null;
 }
-function names() { if (!S.names) S.names = computeNames(vis()); return S.names; }
+function names() { if (!S.names) S.names = computeNames(vis(), S.settings.tbmName); return S.names; }
 function nameOf(it) { return (names().get(it.id) || it.id) + '.' + extOf(it); }
 function remember(it) {
   if (S.byId.has(it.id)) { const k = S.items.findIndex((x) => x.id === it.id); S.items[k] = it; }
@@ -205,11 +206,12 @@ function computeFan(st, item) {
 const DIRS = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
 function bearingText(theta) { const b = bearingOf(theta, north()); return `${DIRS[Math.round(b / 45) % 8]} ${b}°`; }
 const SRC = { members: '부재 기준', manual: '직접 지정', compass: '나침반' };
-const LENS = { '0.5x': '0.5× 초광각', '1x': '1×', '2x': '2×', native: '기본 카메라', album: '앨범' };
+const LENS = { '0.5x': '0.5× 초광각', '1x': '1×', '2x': '2×', native: '기본 카메라', album: '앨범', scan: '문서 스캔' };
 const pitchText = (p) => (p == null ? '' : `${p > 0 ? '+' : ''}${p}°${p <= -20 ? ' (아래)' : p >= 20 ? ' (위)' : ''}`);
 
 function placeText(it) {
   if (it.tbm) return 'TBM';
+  if (it.doc) return '문서';
   if (!it.pin) return '위치 없음';
   return it.room ? it.room.name : floorLabel(it.floor);
 }
@@ -354,6 +356,12 @@ async function onShutter() {
   if (!sensors.asked) sensors.requestPermission();
   if (S.settings.capture === 'native' || !cam.active) { shootNative('photo'); return; }
   if (camBusy) return;
+  if (S.scan) {
+    let c;
+    try { c = cam.captureCanvas(); } catch (e) { toast((e && e.message) || '찍지 못했어요'); return; }
+    await scanAndSave(c);
+    return;
+  }
   camBusy = true;
   const btn = $('#camShutter');
   btn.classList.add('working');
@@ -371,6 +379,14 @@ async function shootNative(kind) {
   const f = await nativeCapture(kind);
   if (!f) { startCamera(); return; }
   const isVideo = kind === 'video' || /^video\//.test(f.type);
+  if (S.scan && !isVideo) {
+    const b = busy('사진을 불러오는 중…');
+    let c = null;
+    try { c = await canvasFromBlob(f); } catch (e) { toast('사진을 읽지 못했어요'); } finally { b.done(); }
+    if (c) await scanAndSave(c);
+    startCamera();
+    return;
+  }
   const b = busy(isVideo ? '영상을 불러오는 중…' : '사진을 불러오는 중…');
   let t = { thumb: null, w: 0, h: 0 };
   try { t = isVideo ? await videoThumb(f) : await imageThumb(f); } catch (e) { /* keep going without a thumbnail */ }
@@ -411,6 +427,25 @@ async function onCaptured(media) {
   const draftP = putItem(it, media.blob, media.thumb);
   draftP.catch(() => {});
   openSheet({ mode: S.mode === 'fix' ? 'fix' : 'new', item: it, draftP, media });
+}
+
+// document scan: the page is found, flattened and cleaned, then kept without a drawing location (날짜_문서_번호)
+function renderCamScan() {
+  const b = $('#camScan');
+  b.setAttribute('aria-pressed', String(S.scan));
+  b.textContent = S.scan ? '문서 스캔 켬' : '문서 스캔';
+}
+async function scanAndSave(c) {
+  const r = await openScan(c);
+  c.width = c.height = 1;
+  if (!r) return;
+  const ts = Date.now();
+  const media = { ...r, kind: 'photo', lens: 'scan', blob: await outBlob({ kind: 'photo', ts, w: r.w, h: r.h }, r.blob) };
+  const it = newRecord(media, ts, { doc: true, floor: null });
+  try { await putItem(it, media.blob, media.thumb); }
+  catch (e) { alertBox('저장하지 못했어요', (e && e.message) || '저장 공간이 부족할 수 있어요.'); return; }
+  renderCamLast();
+  toast(`문서 저장 · ${nameOf(it)}`);
 }
 
 function startTbm() {
@@ -815,8 +850,9 @@ function renderViewerInfo(it) {
   const add = (k, ...v) => { if (v.length && v[0] != null && v[0] !== '') rows.push(el('span', { class: 'k' }, k), el('span', { class: 'v' }, ...v)); };
   add('날짜', `${dayLabel(it.day)} ${timeOf(it.ts)}`);
   if (it.tbm) add('구분', 'TBM');
+  if (it.doc) add('구분', '문서 스캔');
   if (it.fixOf) add('구분', '조치 후 사진');
-  if (!it.tbm) {
+  if (!it.tbm && !it.doc) {
     add('층', floorLabel(it.floor));
     add('위치', it.pin ? (it.room ? it.room.name + (it.room.code && it.room.code !== it.room.name ? ` (${it.room.code})` : '') : '실 밖') : '아직 안 정했어요');
     if (it.pin) add('그리드', it.grid);
@@ -845,7 +881,7 @@ function renderViewerActions(it) {
     else if (it.issue.status === 'open') { A.push(btn('조치 사진 찍기', () => startFix(it), 'primary')); A.push(btn('이슈 해제', () => setIssue(it, null))); }
     else A.push(btn('다시 미조치로', () => setIssue(it, 'reopen')));
   }
-  if (!it.tbm) A.push(btn(it.pin ? '위치 고치기' : '위치 붙이기', () => openSheet({ mode: 'edit', item: it }), it.pin ? '' : 'primary'));
+  if (!it.tbm && !it.doc) A.push(btn(it.pin ? '위치 고치기' : '위치 붙이기', () => openSheet({ mode: 'edit', item: it }), it.pin ? '' : 'primary'));
   A.push(btn('메모', () => editMemo(it)));
   if (it.kind === 'photo' && it.memo) A.push(btn(it.memoOff ? '사진에 메모 보이기' : '사진에서 메모 숨기기', () => toggleMemoOn(it)));
   A.push(btn('공유', () => shareOne(it)));
@@ -1003,7 +1039,8 @@ function cellFor(it, { tag = 'button', onClick = null, label = null, selectable 
   if (t) c.append(el('span', { class: 't' }, t));
   const b = el('span', { class: 'b' });
   if (it.kind === 'video') b.append(el('span', { class: 'badge video' }, '영상'));
-  if (!it.tbm && !it.pin) b.append(el('span', { class: 'badge nopin' }, '위치 없음'));
+  if (it.doc) b.append(el('span', { class: 'badge doc' }, '문서'));
+  if (!it.tbm && !it.doc && !it.pin) b.append(el('span', { class: 'badge nopin' }, '위치 없음'));
   if (it.issue) b.append(el('span', { class: 'badge ' + (it.issue.status === 'open' ? 'open' : 'done') }, it.issue.status === 'open' ? '이슈' : '조치됨'));
   if (it.fixOf) b.append(el('span', { class: 'badge done' }, '조치 후'));
   if (it.memo) b.append(el('span', { class: 'badge' }, '메모'));
@@ -1350,10 +1387,10 @@ function updateBadge() {
 const CSV_HEAD = ['파일명', '날짜', '시간', '층', '실', '실 코드', '그리드', '부재', '방향', '방향 기준', '기울기(°)', '렌즈', '구분', '이슈', '조치일', '짝 사진', '메모'];
 function csvRow(it, fn, fileOf) {
   return [
-    fn, it.day, timeOf(it.ts), it.tbm ? '' : floorLabel(it.floor), it.room ? it.room.name : '', it.room ? it.room.code : '',
-    it.grid || '', it.tbm ? '' : (it.noMember ? '부재 없음' : memberText(it)), it.fan ? bearingText(it.fan.dir) : '',
+    fn, it.day, timeOf(it.ts), it.tbm || it.doc ? '' : floorLabel(it.floor), it.room ? it.room.name : '', it.room ? it.room.code : '',
+    it.grid || '', it.tbm || it.doc ? '' : (it.noMember ? '부재 없음' : memberText(it)), it.fan ? bearingText(it.fan.dir) : '',
     it.fan ? SRC[it.fan.src] || '' : '', it.pitch == null ? '' : it.pitch, LENS[it.lens] || it.lens || '',
-    it.tbm ? 'TBM' : it.fixOf ? '조치 후' : '', it.issue ? (it.issue.status === 'open' ? '미조치' : '조치 완료') : '',
+    it.tbm ? 'TBM' : it.doc ? '문서' : it.fixOf ? '조치 후' : '', it.issue ? (it.issue.status === 'open' ? '미조치' : '조치 완료') : '',
     (it.issue && it.issue.fixedDay) || '',
     it.issue && it.issue.fixId ? '조치 후: ' + fileOf(it.issue.fixId) : it.fixOf ? '조치 전: ' + fileOf(it.fixOf) : '',
     it.memo || '',
@@ -1777,6 +1814,18 @@ async function renderMore() {
     el('p', {}, '앱 카메라는 아이폰이 앱을 열 때마다 카메라 허용을 물어봐요(아이폰이 홈 화면 앱의 허용을 기억하지 않아요). 기본 카메라는 묻지 않아요.'),
     seg));
   const hasSensor = sensors.heading != null;
+  const tbmName = S.settings.tbmName || '건축';
+  parts.push(group('TBM 사진 이름',
+    el('p', {}, `TBM 사진은 "${yymmdd(today())} ${tbmName}"처럼 이름이 붙어요. 같은 날 두 장째부터는 _2, _3이 붙어요.`),
+    btns(btn('바꾸기', async () => {
+      const t = await promptText('TBM 사진 이름', tbmName, { placeholder: '예: 건축', multiline: false, hint: '날짜 뒤에 붙는 말이에요.' });
+      if (t === null || !t.trim()) return;
+      S.settings.tbmName = t.trim();
+      S.names = null;
+      saveSettings();
+      renderMore();
+      renderCurrent();
+    }))));
   parts.push(group('나침반',
     el('p', {}, hasSensor ? `지금 나침반 ${Math.round(sensors.heading)}°` : '나침반 값이 아직 없어요. "센서 켜기"를 눌러 허용해 주세요.'),
     el('p', {}, `보정값 ${S.settings.calib > 0 ? '+' : ''}${S.settings.calib || 0}° · 부재 없이 찍을 때 방향을 정하는 데 써요. 철골·철근 가까이에서는 틀릴 수 있어요.`),
@@ -1856,6 +1905,7 @@ function bindUI() {
   $('#camShutter').onclick = onShutter;
   $('#camNative').onclick = () => shootNative('photo');
   $('#camVideoBtn').onclick = () => shootNative('video');
+  $('#camScan').onclick = () => { S.scan = !S.scan; renderCamScan(); if (S.scan) toast('종이 전체가 보이게 찍어 주세요'); };
   $('#camFloor').onclick = async () => {
     const k = await chooseFloor(S.settings.capFloor);
     if (k) { S.settings.capFloor = k; saveSettings(); renderCamTop(); }

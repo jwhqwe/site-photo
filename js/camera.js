@@ -59,7 +59,8 @@ export class Camera {
       return out.sort((a, b) => parseFloat(a.zoom) - parseFloat(b.zoom));
     } catch (e) { return []; }
   }
-  async capture() {
+  // the current frame (the middle part at 2× when the camera cannot zoom itself)
+  captureCanvas() {
     const v = this.video;
     const W = v.videoWidth, H = v.videoHeight;
     if (!W || !H) throw new Error('카메라 화면이 아직 준비되지 않았어요');
@@ -67,6 +68,10 @@ export class Camera {
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     c.getContext('2d').drawImage(v, (W - w) / 2, (H - h) / 2, w, h, 0, 0, w, h);
+    return c;
+  }
+  async capture() {
+    const c = this.captureCanvas(), w = c.width, h = c.height;
     const blob = await canvasBlob(c, 'image/jpeg', 0.92);
     const thumb = await thumbFrom(c, w, h);
     c.width = c.height = 1;

@@ -59,18 +59,20 @@ export function extOf(item) {
 }
 
 // "그 밖의 사진" names: 날짜_위치_번호, numbered per day and place in shooting order.
-// TBM: 날짜_TBM_번호. A fix photo takes its issue photo's name + _조치후.
-export function computeNames(items) {
+// TBM: "날짜 공종" (261028 건축), then 261028 건축_2 … A scanned page: 날짜_문서_번호.
+// A fix photo takes its issue photo's name + _조치후.
+export function computeNames(items, tbmLabel = '건축') {
   const byId = new Map(items.map((it) => [it.id, it]));
   const base = new Map();
   const groups = new Map();
+  const tbm = fileSafe(tbmLabel || '') || 'TBM';
   for (const it of [...items].sort((a, b) => a.ts - b.ts)) {
     if (it.fixOf) continue;
-    const place = it.tbm ? 'TBM' : (it.room ? fileSafe(it.room.name) : '위치없음');
+    const place = it.tbm ? 'TBM' : it.doc ? '문서' : (it.room ? fileSafe(it.room.name) : '위치없음');
     const k = it.day + '|' + place;
     const n = (groups.get(k) || 0) + 1;
     groups.set(k, n);
-    base.set(it.id, `${yymmdd(it.day)}_${place}_${n}`);
+    base.set(it.id, it.tbm ? `${yymmdd(it.day)} ${tbm}${n > 1 ? '_' + n : ''}` : `${yymmdd(it.day)}_${place}_${n}`);
   }
   for (const it of items) {
     if (!it.fixOf) continue;
@@ -302,7 +304,7 @@ export async function withMovieTime(blob, ts) {
 // ---------------------------------------------------------------- memo on the picture
 // The memo sits in a corner, in the same proportions on screen and in the shared picture.
 export const MEMO = { fs: 0.045, padX: 0.5, padY: 0.32, edge: 0.03, maxW: 0.62, lh: 1.35, r: 0.25, bg: 'rgba(17,17,17,0.55)',
-  font: "-apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" };
+  font: "Pretendard, -apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" };
 const loadImage = (url) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
 // place words in the memo: what it is about stays uncovered (상부 균열 → the memo goes to the bottom)
 export function memoCues(text) {
@@ -386,6 +388,7 @@ export async function burnMemo(blob, text, pos) {
     const x = c.getContext('2d');
     x.drawImage(img, 0, 0, W, H);
     const s = Math.min(W, H), fs = MEMO.fs * s, px = MEMO.padX * fs, py = MEMO.padY * fs, m = MEMO.edge * s;
+    try { await document.fonts.load(`700 ${Math.round(fs)}px Pretendard`, text); } catch (e) { /* the system font then */ }
     x.font = `700 ${fs}px ${MEMO.font}`;
     const lines = wrapLines(x, text, W * MEMO.maxW - 2 * px);
     const bw = Math.max(...lines.map((l) => x.measureText(l).width)) + 2 * px, bh = lines.length * MEMO.lh * fs + 2 * py;
