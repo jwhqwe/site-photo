@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -1806,6 +1806,7 @@ async function makeBackup(send = false) {
       pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(),
     };
     entries.push({ name: 'backup.json', text: JSON.stringify(meta) });
+    markZip(meta);
     let k = 0;
     for (const it of items) {
       const f = await db.get('files', it.id);
@@ -1833,7 +1834,7 @@ async function makeBackup(send = false) {
     const hm = timeOf(Date.now()).replace(':', '');
     const r = send
       ? await offerFile(zip, `현장사진_보내기_${yymmdd(today())}_${hm}.zip`, '보낼 파일 준비 완료',
-        `새로 찍거나 고친 사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}\nAirDrop으로 아이패드에 보내고, 아이패드 앱의 더보기 → '백업에서 복원'으로 넣으세요. 도면은 빠져 있어요(아이패드에 먼저 넣어 두세요).`)
+        `새로 찍거나 고친 사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}\n"파일에 저장" → iCloud Drive의 현장사진 폴더에 두세요. 아이패드 앱의 더보기 → '백업에서 복원'에서 그 폴더의 ZIP을 모두 고르면 새 것만 들어가요. 도면은 빠져 있어요(아이패드에 먼저 넣어 두세요).`)
       : await offerFile(zip, `현장사진_백업_${yymmdd(today())}.zip`, '백업 파일 준비 완료',
         `사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}\n"파일에 저장"으로 폰이나 PC에 보관하세요.`);
     if ((r === 'shared' || r === 'downloaded') && send) {
@@ -1896,7 +1897,9 @@ async function moveOut() {
       if (t) entries.push({ name: `thumbs/${it.id}.jpg`, blob: t.blob, date: new Date(it.ts) });
     }
     if (!items.length) { b.done(); toast('옮길 원본이 없어요', 2400); return; }
-    entries.unshift({ name: 'backup.json', text: JSON.stringify({ format: 'fieldphoto-backup', version: 1, kind: 'originals', app: APP_VERSION, created: new Date().toISOString(), items, files }) });
+    const meta = { format: 'fieldphoto-backup', version: 1, kind: 'originals', app: APP_VERSION, created: new Date().toISOString(), items, files };
+    entries.unshift({ name: 'backup.json', text: JSON.stringify(meta) });
+    markZip(meta);
     zip = await makeZip(entries, (i, n) => b.set(`원본 묶는 중… ${i}/${n}`));
     const d0 = yymmdd(items[0].day), d1 = yymmdd(items[items.length - 1].day);
     name = `현장사진_원본_${d0 === d1 ? d0 : d0 + '-' + d1}.zip`;
@@ -1936,7 +1939,26 @@ async function moveOut() {
   renderCurrent();
 }
 
-async function restoreFrom(file) {
+// a ZIP is known by when it was made and what it holds. ZIPs made on this device, or already put in, are skipped
+// when several are picked at once (the whole iCloud Drive folder can be picked every time).
+const zipKey = (meta) => `${meta.created}|${(meta.items || []).length}`;
+function markZip(meta) {
+  const a = (S.settings.zips || []).filter((k) => k !== zipKey(meta));
+  a.push(zipKey(meta));
+  S.settings.zips = a.slice(-300);
+  saveSettings();
+}
+async function restoreMany(files) {
+  const ok = await confirmBox('여러 파일 복원', `${files.length}개 파일을 차례로 넣어요. 이미 넣었거나 이 기기에서 만든 파일은 건너뛰고, 같은 사진은 더 나중에 고친 쪽을 남겨요.`, '복원');
+  if (!ok) return;
+  let done = 0, skip = 0, fail = 0;
+  for (const f of [...files].sort((a, b) => a.name.localeCompare(b.name))) {
+    const r = await restoreFrom(f, { many: true });
+    if (r === 'skip') skip++; else if (r) done++; else fail++;
+  }
+  toast(`${done ? `${done}개 파일을 넣었어요` : '새로 넣을 파일이 없어요'}${skip ? ` · ${skip}개는 이미 넣은 것` : ''}${fail ? ` · ${fail}개 못 넣음` : ''}`, 3500);
+}
+async function restoreFrom(file, { many = false } = {}) {
   let z, meta;
   const b = busy('백업 파일 읽는 중…');
   try {
@@ -1951,16 +1973,17 @@ async function restoreFrom(file) {
     return false;
   }
   b.done();
+  if (many && (S.settings.zips || []).includes(zipKey(meta))) return 'skip';
   const items = (meta.items || []).filter((i) => !i.draft);
   const have = new Set(S.items.map((i) => i.id));
   const fresh = items.filter((i) => !have.has(i.id)).length;
   const withDrawings = z.has('drawings/floors.json') && !S.pkg;
-  const ok = await confirmBox('백업에서 복원',
+  const ok = many || await confirmBox('백업에서 복원',
     `백업 안의 사진·영상 ${items.length}개 중 새로 넣을 것 ${fresh}개` +
     (items.length - fresh ? (meta.kind === 'originals' ? `, 이미 있는 ${items.length - fresh}개는 원본을 되돌려 놓아요` : `, 이미 있는 ${items.length - fresh}개는 더 나중에 고친 쪽을 남겨요`) : '') + '.' +
     (withDrawings ? '\n도면도 같이 넣어요.' : ''), '복원');
   if (!ok) return false;
-  const b2 = busy('복원 중…');
+  const b2 = busy(many ? `복원 중… ${file.name}` : '복원 중…');
   try {
     if (withDrawings) await restoreDrawings(z);
     let n = 0;
@@ -1999,7 +2022,8 @@ async function restoreFrom(file) {
     return false;
   }
   b2.done();
-  toast(`복원했어요 (${items.length}개)`);
+  markZip(meta);
+  if (!many) toast(`복원했어요 (${items.length}개)`);
   return true;
 }
 async function restoreDrawings(z) {
@@ -2299,10 +2323,16 @@ async function renderMore() {
     el('p', {}, last ? `마지막 백업 ${dayLabel(dayOf(last))} ${timeOf(last)}` : '아직 백업한 적이 없어요.'),
     el('p', {}, '사진·기록·도면을 ZIP 하나로 묶어요. 폰을 바꾸거나 앱을 지울 때 이 파일로 되살려요.'),
     btns(btn('백업 파일 만들기', () => makeBackup(), 'primary'),
-      btn('백업에서 복원', async () => { const [f] = await pickFiles({ accept: '.zip,application/zip' }); if (f && (await restoreFrom(f))) renderCurrent(); }))));
+      btn('백업에서 복원', async () => {
+        const fs = await pickFiles({ accept: '.zip,application/zip', multiple: true });
+        if (!fs.length) return;
+        if (fs.length > 1) await restoreMany(fs);
+        else await restoreFrom(fs[0]);
+        renderCurrent();
+      }))));
   const sent = S.settings.lastSent;
-  parts.push(group('아이패드로 보내기',
-    el('p', {}, '실시간으로 맞추려면 사진이 인터넷 서버를 거쳐야 해서 이 앱에서는 하지 않아요. 대신 지난번에 보낸 뒤로 새로 찍거나 고친 것만 묶어 AirDrop으로 보내고, 아이패드에서 복원하면 합쳐져요.'),
+  parts.push(group('아이패드와 맞추기 (iCloud Drive)',
+    el('p', {}, '보내는 쪽: "새 것만 보내기" → 공유 · 저장 → 파일에 저장 → iCloud Drive의 같은 폴더(예: 현장사진). 받는 쪽: "백업에서 복원"에서 그 폴더의 ZIP을 모두 고르면, 이미 넣은 것과 그 기기에서 만든 것은 건너뛰고 새 것만 들어가요. 아이패드에서 고친 것도 같은 방법으로 아이폰에 넣을 수 있어요.'),
     el('p', {}, sent ? `마지막으로 보낸 때 ${dayLabel(dayOf(sent))} ${timeOf(sent)}` : '아직 보낸 적이 없어요.'),
     btns(btn('새 것만 보내기', () => makeBackup(true)))));
   const storage = el('p', {}, '확인 중…');

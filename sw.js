@@ -1,5 +1,5 @@
 // Offline shell. Only the app's own code is cached here; drawings and photos stay in IndexedDB.
-const VERSION = 'fieldphoto-f34e9c8e37';
+const VERSION = 'fieldphoto-efd2b245a8';
 const SHELL = [
   './', 'index.html', 'app.css', 'manifest.webmanifest',
   'js/main.js', 'js/ui.js', 'js/util.js', 'js/db.js', 'js/plan.js', 'js/camera.js', 'js/scan.js', 'js/todo.js', 'js/report.js',
