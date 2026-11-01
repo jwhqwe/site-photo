@@ -1,5 +1,5 @@
 // In-app camera (fast: shutter -> drawing -> back), the phone's own camera as a fallback, and the motion sensors.
-import { canvasBlob, thumbFrom } from './util.js';
+import { canvasBlob, thumbFrom, imageThumb } from './util.js';
 
 export class Camera {
   constructor(video) {
@@ -70,13 +70,43 @@ export class Camera {
     c.getContext('2d').drawImage(v, (W - w) / 2, (H - h) / 2, w, h, 0, 0, w, h);
     return c;
   }
+  // a real photo from the camera's photo pipeline (Safari 18.4+): full size and processed like the Camera app,
+  // instead of a still from the live video. At 2× without the camera's own zoom the video frame is used.
+  async takePhoto() {
+    const tr = this.track;
+    if (typeof ImageCapture !== 'function' || !tr || tr.readyState !== 'live' || this.crop > 1) return null;
+    if (!this.ic || this.icTrack !== tr) { this.ic = new ImageCapture(tr); this.icTrack = tr; }
+    const blob = await this.ic.takePhoto();
+    return blob && blob.size ? blob : null;
+  }
   async capture() {
+    try {
+      let p = await this.takePhoto();
+      if (p && !/jpe?g|hei[cf]/i.test(p.type || '')) p = await toJpeg(p); // keep photos as JPEG (date inside)
+      if (p) {
+        const t = await imageThumb(p);
+        if (t.w) return { blob: p, thumb: t.thumb, w: t.w, h: t.h, mime: p.type || 'image/jpeg' };
+      }
+    } catch (e) { /* the video frame then */ }
     const c = this.captureCanvas(), w = c.width, h = c.height;
     const blob = await canvasBlob(c, 'image/jpeg', 0.92);
     const thumb = await thumbFrom(c, w, h);
     c.width = c.height = 1;
     return { blob, thumb, w, h, mime: 'image/jpeg' };
   }
+}
+
+async function toJpeg(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    c.getContext('2d').drawImage(img, 0, 0);
+    const out = await canvasBlob(c, 'image/jpeg', 0.95);
+    c.width = c.height = 1;
+    return out;
+  } finally { URL.revokeObjectURL(url); }
 }
 
 // the phone's own camera app, for full quality, volume-key shutter and video

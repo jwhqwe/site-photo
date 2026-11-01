@@ -9,7 +9,7 @@ import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN
 import { openScan, canvasFromBlob } from './scan.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -357,8 +357,9 @@ async function onShutter() {
   if (S.settings.capture === 'native' || !cam.active) { shootNative('photo'); return; }
   if (camBusy) return;
   if (S.scan) {
-    let c;
-    try { c = cam.captureCanvas(); } catch (e) { toast((e && e.message) || '찍지 못했어요'); return; }
+    let c = null;
+    try { const p = await cam.takePhoto(); if (p) c = await canvasFromBlob(p); } catch (e) { c = null; }
+    try { if (!c) c = cam.captureCanvas(); } catch (e) { toast((e && e.message) || '찍지 못했어요'); return; }
     await scanAndSave(c);
     return;
   }
@@ -1090,25 +1091,30 @@ function renderDays() {
   const card = $('#tbmCard');
   const missing = !tbm.length && (rest.length > 0 || day === today());
   card.classList.toggle('missing', missing);
-  const row = el('div', { class: 'row' }, ...tbm.map((it) => cellFor(it, { selectable: true })));
-  if (day === today()) row.append(el('button', { class: 'add', onclick: startTbm }, '+ 찍기'));
-  row.append(el('button', { class: 'add', onclick: () => importMedia(day, true) }, '+ 앨범'));
+  const row = el('div', { class: 'row' },
+    day === today() ? el('button', { class: 'add', onclick: startTbm }, '+ 찍기') : null,
+    el('button', { class: 'add', onclick: () => importMedia(day, true) }, '+ 앨범'),
+    ...tbm.map((it) => cellFor(it, { selectable: true })));
   card.replaceChildren(el('h3', {}, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요')), row);
 
   $('#dGrid').replaceChildren(...rest.map((it) => cellFor(it, { selectable: true })));
   $('#dEmpty').hidden = rest.length > 0;
+  $('#dCount').textContent = rest.length ? `사진 ${rest.length}장` : '사진';
   renderSelBar();
 }
 function renderSelBar() {
   $('#dSelect').textContent = D.selecting ? '취소' : '선택';
   $('#dSelBar').hidden = !D.selecting;
+  $('#scr-days').classList.toggle('selecting', D.selecting);
   $('#dSelCount').textContent = `${D.sel.size}개`;
   for (const id of ['dSelMemo', 'dSelShare', 'dSelExport', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
 }
 // ---------------------------------------------------------------- drag to select (day page)
 // In 선택 mode, slide sideways across photos to select them; moving up or down then takes whole rows, like the
-// Photos app. Pressing and holding a photo starts selecting from it, even outside 선택 mode.
-const DS = { active: false, pending: null, anchor: -1, target: true, base: null, x: 0, y: 0, raf: 0, hold: 0 };
+// Photos app. A swipe that starts up or down scrolls instead. Pressing and holding a photo starts selecting from
+// it, even outside 선택 mode. In 선택 mode the photos take the touch themselves (touch-action: none), because
+// iPhone Safari otherwise starts scrolling at the first slant of the finger and drops the selection.
+const DS = { active: false, pending: null, anchor: -1, target: true, base: null, x: 0, y: 0, raf: 0, hold: 0, scroll: null, glide: 0 };
 const dayCells = () => [...$$('#tbmCard .cell[data-id]'), ...$$('#dGrid .cell[data-id]')];
 function cellIndexAt(x, y) {
   const t = document.elementFromPoint(x, y);
@@ -1155,6 +1161,7 @@ function bindDragSelect() {
   root.addEventListener('pointerdown', (e) => {
     const c = e.target.closest ? e.target.closest('.cell[data-id]') : null;
     if (!c || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    cancelAnimationFrame(DS.glide);
     DS.pending = { x0: e.clientX, y0: e.clientY, id: c.dataset.id, pid: e.pointerId };
     DS.x = e.clientX; DS.y = e.clientY;
     clearTimeout(DS.hold);
@@ -1166,17 +1173,41 @@ function bindDragSelect() {
   root.addEventListener('pointermove', (e) => {
     DS.x = e.clientX; DS.y = e.clientY;
     if (DS.active) { dsApply(cellIndexAt(e.clientX, e.clientY)); return; }
+    const s = DS.scroll;
+    if (s) {
+      s.el.scrollTop = s.top - (e.clientY - s.y0);
+      const dt = Math.max(1, e.timeStamp - s.t);
+      s.v = (s.y - e.clientY) / dt;
+      s.y = e.clientY; s.t = e.timeStamp;
+      return;
+    }
     const p = DS.pending;
     if (!p) return;
     const dx = e.clientX - p.x0, dy = e.clientY - p.y0;
-    if (Math.hypot(dx, dy) < 10) return;
+    if (Math.hypot(dx, dy) < 8) return;
     clearTimeout(DS.hold);
     DS.pending = null;
-    if (D.selecting && Math.abs(dx) > Math.abs(dy)) { dsStart(p.id, p.pid); dsApply(cellIndexAt(e.clientX, e.clientY)); }
+    if (!D.selecting) return; // outside 선택 mode the page scrolls by itself
+    if (Math.abs(dx) >= Math.abs(dy)) { dsStart(p.id, p.pid); dsApply(cellIndexAt(e.clientX, e.clientY)); return; }
+    const sc = $('#scr-days .scroll');
+    DS.scroll = { el: sc, top: sc.scrollTop, y0: p.y0, y: e.clientY, t: e.timeStamp, v: 0 };
+    sc.scrollTop = DS.scroll.top - dy;
+    try { root.setPointerCapture(p.pid); } catch (err) { /* fine without */ }
   });
   const up = () => {
     clearTimeout(DS.hold);
     DS.pending = null;
+    if (DS.scroll) { // let the list glide a little, like a normal swipe
+      const s = DS.scroll;
+      DS.scroll = null;
+      let v = s.v;
+      cancelAnimationFrame(DS.glide);
+      const glide = () => { if (Math.abs(v) < 0.02) return; s.el.scrollTop += v * 16; v *= 0.94; DS.glide = requestAnimationFrame(glide); };
+      DS.glide = requestAnimationFrame(glide);
+      D.suppressClick = true;
+      setTimeout(() => { D.suppressClick = false; }, 0);
+      return;
+    }
     if (!DS.active) return;
     DS.active = false;
     cancelAnimationFrame(DS.raf);
@@ -1185,7 +1216,7 @@ function bindDragSelect() {
   };
   root.addEventListener('pointerup', up);
   root.addEventListener('pointercancel', up);
-  root.addEventListener('touchmove', (e) => { if (DS.active && e.cancelable) e.preventDefault(); }, { passive: false });
+  root.addEventListener('touchmove', (e) => { if ((DS.active || DS.scroll) && e.cancelable) e.preventDefault(); }, { passive: false });
 }
 
 function stepDay(dir) {

@@ -213,7 +213,9 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .more-group h3 { margin: 0; font-size: 17px; font-weight: 800; }
 .more-group p { margin: 0; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
 .more-group .btns { display: flex; flex-wrap: wrap; gap: 8px; }
-.d-more { display: flex; justify-content: center; padding: 14px 0 4px; }
+.d-more { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 2px solid var(--line); padding: 10px 0; }
+.d-more h3 { margin: 0; font-size: 16px; font-weight: 800; }
+#scr-days.selecting .cell { touch-action: none; }
 
 .busy { position: fixed; inset: 0; z-index: 40; background: rgba(17,17,17,.5); display: flex; align-items: center; justify-content: center; color: #fff; text-align: center; font-weight: 600; }
 .busy[hidden] { display: none; }

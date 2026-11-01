@@ -193,26 +193,41 @@ export function exifOffset(ts) {
   const a = Math.abs(m);
   return `${m >= 0 ? '+' : '-'}${p2(Math.floor(a / 60))}:${p2(a % 60)}`;
 }
-// a camera's own Exif block is kept as it is
-function hasExif(u8) {
+// a JPEG's own Exif block: where it is, its orientation, and whether it holds the shooting date
+function exifBlock(u8) {
   let p = 2;
   while (p + 8 <= u8.length && u8[p] === 0xff) {
     const m = u8[p + 1];
     if (m === 0xda || m === 0xd9) break;
     const len = (u8[p + 2] << 8) | u8[p + 3];
-    if (m === 0xe1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) return true;
+    if (m === 0xe1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) {
+      const t = p + 10, end = p + 2 + len, le = u8[t] === 0x49, dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+      const g16 = (o) => dv.getUint16(t + o, le), g32 = (o) => dv.getUint32(t + o, le);
+      let orient = 1, date = false, exifAt = 0;
+      const scan = (ifd, fn) => {
+        if (!ifd || t + ifd + 2 > end) return;
+        const n = g16(ifd);
+        for (let i = 0; i < n && t + ifd + 14 + i * 12 <= end; i++) fn(g16(ifd + 2 + i * 12), ifd + 2 + i * 12);
+      };
+      try {
+        scan(g32(4), (tag, e) => { if (tag === 0x0112) orient = g16(e + 8); else if (tag === 0x8769) exifAt = g32(e + 8); });
+        scan(exifAt, (tag) => { if (tag === 0x9003) date = true; });
+      } catch (e) { /* a broken block counts as one without a date */ }
+      return { start: p, end, orient, date };
+    }
     p += 2 + len;
   }
-  return false;
+  return null;
 }
-function buildExif(ts, w, h) {
+function buildExif(ts, w, h, orient = 1) {
+  if (orient >= 5 && orient <= 8) [w, h] = [h, w]; // stored sideways
   const ascii = (str) => { const a = new Uint8Array(str.length + 1); for (let i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) & 0x7f; return a; };
   const short = (v) => new Uint8Array([(v >> 8) & 255, v & 255]);
   const long = (v) => new Uint8Array([(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]);
   const dt = ascii(exifDate(ts)), off = ascii(exifOffset(ts)), sub = ascii(p2(Math.floor(new Date(ts).getMilliseconds() / 10)));
   const sw = ascii('site-photo');
   // [tag, type, count, bytes], sorted by tag. Types: 2 ASCII, 3 SHORT, 4 LONG, 7 UNDEFINED
-  const ifd0 = [[0x0112, 3, 1, short(1)], [0x0131, 2, sw.length, sw], [0x0132, 2, dt.length, dt], [0x8769, 4, 1, long(0)]];
+  const ifd0 = [[0x0112, 3, 1, short(orient)], [0x0131, 2, sw.length, sw], [0x0132, 2, dt.length, dt], [0x8769, 4, 1, long(0)]];
   const exif = [[0x9000, 7, 4, ascii('0232').subarray(0, 4)], [0x9003, 2, dt.length, dt], [0x9004, 2, dt.length, dt],
     [0x9010, 2, off.length, off], [0x9011, 2, off.length, off], [0x9012, 2, off.length, off],
     [0x9290, 2, sub.length, sub], [0x9291, 2, sub.length, sub], [0x9292, 2, sub.length, sub], [0xa001, 3, 1, short(1)]];
@@ -246,11 +261,15 @@ function buildExif(ts, w, h) {
   seg.set(tiff, 10);
   return seg;
 }
-// returns the JPEG with the date and time written in, unless it already has its own Exif
+// returns the JPEG with the date and time written in. A camera's own Exif with a date is kept as it is;
+// one without a date is replaced by ours, keeping its orientation so the photo does not turn.
 export async function withExif(blob, ts, w, h) {
   if (!blob || (blob.type && !/jpe?g/i.test(blob.type))) return blob;
   const u8 = new Uint8Array(await blob.arrayBuffer());
-  if (u8.length < 4 || u8[0] !== 0xff || u8[1] !== 0xd8 || hasExif(u8)) return blob;
+  if (u8.length < 4 || u8[0] !== 0xff || u8[1] !== 0xd8) return blob;
+  const ex = exifBlock(u8);
+  if (ex && ex.date) return blob;
+  if (ex) return new Blob([u8.subarray(0, ex.start), buildExif(ts, w, h, ex.orient), u8.subarray(ex.end)], { type: 'image/jpeg' });
   let at = 2;
   if (u8[2] === 0xff && u8[3] === 0xe0) at = 4 + ((u8[4] << 8) | u8[5]); // keep a JFIF header first
   return new Blob([u8.subarray(0, at), buildExif(ts, w, h), u8.subarray(at)], { type: 'image/jpeg' });
