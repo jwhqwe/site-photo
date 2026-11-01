@@ -254,6 +254,155 @@ export async function withExif(blob, ts, w, h) {
   return new Blob([u8.subarray(0, at), buildExif(ts, w, h), u8.subarray(at)], { type: 'image/jpeg' });
 }
 
+// ---------------------------------------------------------------- video: the shooting time in the movie header
+// QuickTime/MP4 keep it in mvhd/tkhd/mdhd as seconds since 1904 (UTC). A camera's own time is kept; a missing one is filled.
+const MAC_EPOCH = 2082844800;
+function movieBox(dv, p, end) {
+  if (p + 8 > end) return null;
+  let size = dv.getUint32(p), hl = 8;
+  const type = String.fromCharCode(dv.getUint8(p + 4), dv.getUint8(p + 5), dv.getUint8(p + 6), dv.getUint8(p + 7));
+  if (size === 1) { if (p + 16 > end) return null; size = Number(dv.getBigUint64(p + 8)); hl = 16; } else if (size === 0) size = end - p;
+  return size < hl || p + size > end ? null : { type, size, hl };
+}
+function fillMovieTimes(dv, p, end, secs) {
+  let n = 0;
+  for (let b; (b = movieBox(dv, p, end)); p += b.size) {
+    if (b.type === 'trak' || b.type === 'mdia') n += fillMovieTimes(dv, p + b.hl, p + b.size, secs);
+    else if (b.type === 'mvhd' || b.type === 'tkhd' || b.type === 'mdhd') {
+      const q = p + b.hl, v1 = dv.getUint8(q) === 1;
+      const cur = v1 ? Number(dv.getBigUint64(q + 4)) : dv.getUint32(q + 4);
+      if (cur > MAC_EPOCH + 946684800) continue; // already a real date (after 2000)
+      if (v1) { dv.setBigUint64(q + 4, BigInt(secs)); dv.setBigUint64(q + 12, BigInt(secs)); }
+      else { dv.setUint32(q + 4, secs); dv.setUint32(q + 8, secs); }
+      n++;
+    }
+  }
+  return n;
+}
+export async function withMovieTime(blob, ts) {
+  if (!blob || blob.size < 16) return blob;
+  let p = 0;
+  for (let i = 0; i < 64 && p + 8 <= blob.size; i++) {
+    const h = new DataView(await blob.slice(p, p + 16).arrayBuffer());
+    let size = h.getUint32(0), hl = 8;
+    const type = String.fromCharCode(h.getUint8(4), h.getUint8(5), h.getUint8(6), h.getUint8(7));
+    if (size === 1 && h.byteLength >= 16) { size = Number(h.getBigUint64(8)); hl = 16; } else if (size === 0) size = blob.size - p;
+    if (size < hl) break;
+    if (type === 'moov') {
+      if (size > 32e6 || p + size > blob.size) break;
+      const buf = await blob.slice(p, p + size).arrayBuffer();
+      if (!fillMovieTimes(new DataView(buf), hl, size, Math.floor(ts / 1000) + MAC_EPOCH)) return blob;
+      return new Blob([blob.slice(0, p), buf, blob.slice(p + size)], { type: blob.type || 'video/mp4' });
+    }
+    p += size;
+  }
+  return blob;
+}
+
+// ---------------------------------------------------------------- memo on the picture
+// The memo sits in a corner, in the same proportions on screen and in the shared picture.
+export const MEMO = { fs: 0.045, padX: 0.5, padY: 0.32, edge: 0.03, maxW: 0.62, lh: 1.35, r: 0.25, bg: 'rgba(17,17,17,0.55)',
+  font: "-apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" };
+const loadImage = (url) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+// place words in the memo: what it is about stays uncovered (상부 균열 → the memo goes to the bottom)
+export function memoCues(text) {
+  const s = String(text || '');
+  const under = /(슬래브|보|천장|천정|데크)\s*(하부|밑면|밑)/.test(s);
+  return {
+    t: under || /상부|상단|위쪽|천장|천정|윗부분|상층/.test(s),
+    b: !under && /하부|하단|아래쪽|바닥|기초|하층|발밑|걸레받이/.test(s),
+    l: /좌측|왼쪽/.test(s),
+    r: /우측|오른쪽/.test(s),
+  };
+}
+// a small gray copy of the picture, to find its calm corners
+export async function grayOf(blob, n = 48) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImage(url);
+    const k = n / Math.max(img.naturalWidth, img.naturalHeight);
+    const w = Math.max(4, Math.round(img.naturalWidth * k)), h = Math.max(4, Math.round(img.naturalHeight * k));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const x = c.getContext('2d', { willReadFrequently: true });
+    x.drawImage(img, 0, 0, w, h);
+    const d = x.getImageData(0, 0, w, h).data, g = new Uint8Array(w * h);
+    for (let i = 0; i < g.length; i++) g[i] = (d[4 * i] * 3 + d[4 * i + 1] * 6 + d[4 * i + 2]) / 10;
+    return { g, w, h };
+  } finally { URL.revokeObjectURL(url); }
+}
+// the corner that hides the least: few edges in the picture there, and not where the memo says the problem is
+export function memoCorner(img, text) {
+  const cues = memoCues(text);
+  const E = { tl: 0, tr: 0, bl: 0, br: 0 };
+  if (img) {
+    const { g, w, h } = img, fs = MEMO.fs * Math.min(w, h), lines = String(text || '').split('\n');
+    const longest = Math.max(1, ...lines.map((l) => l.length));
+    const rows = lines.reduce((n, l) => n + Math.max(1, Math.ceil((l.length * 0.95 * fs) / (w * MEMO.maxW))), 0);
+    const W = Math.max(3, Math.round(Math.min(w * MEMO.maxW, (longest * 0.95 + 2 * MEMO.padX) * fs) * 1.15));
+    const H = Math.max(3, Math.round(Math.min(h * 0.6, (rows * MEMO.lh + 2 * MEMO.padY) * fs) * 1.15));
+    let max = 1e-6;
+    for (const k of Object.keys(E)) {
+      const x0 = k[1] === 'l' ? 0 : w - W, y0 = k[0] === 't' ? 0 : h - H;
+      let e = 0;
+      for (let y = y0 + 1; y < y0 + H; y++) for (let x = x0 + 1; x < x0 + W; x++) { const i = y * w + x; e += Math.abs(g[i] - g[i - 1]) + Math.abs(g[i] - g[i - w]); }
+      E[k] = e / (W * H);
+      max = Math.max(max, E[k]);
+    }
+    for (const k of Object.keys(E)) E[k] /= max;
+  }
+  let best = 'bl', bestS = Infinity;
+  for (const k of ['bl', 'br', 'tl', 'tr']) {
+    const s = E[k] + (cues.t && k[0] === 't' ? 1 : 0) + (cues.b && k[0] === 'b' ? 1 : 0) + (cues.l && k[1] === 'l' ? 0.7 : 0) + (cues.r && k[1] === 'r' ? 0.7 : 0);
+    if (s < bestS - 0.05) { best = k; bestS = s; }
+  }
+  return best;
+}
+function wrapLines(x, text, maxW) {
+  const fits = (s) => x.measureText(s).width <= maxW;
+  const out = [];
+  for (const para of String(text).replace(/\r/g, '').split('\n')) {
+    let line = '';
+    for (const word of para.match(/\S+\s*|\s+/g) || ['']) {
+      if (fits(line + word)) { line += word; continue; }
+      if (line.trim()) { out.push(line.trimEnd()); line = ''; }
+      for (const ch of word.trimStart()) { // a word wider than the box breaks between letters
+        if (line && !fits(line + ch)) { out.push(line.trimEnd()); line = ''; }
+        line += ch;
+      }
+    }
+    out.push(line.trimEnd());
+  }
+  return out;
+}
+// the picture with its memo drawn in, the way the viewer shows it
+export async function burnMemo(blob, text, pos) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImage(url);
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const x = c.getContext('2d');
+    x.drawImage(img, 0, 0, W, H);
+    const s = Math.min(W, H), fs = MEMO.fs * s, px = MEMO.padX * fs, py = MEMO.padY * fs, m = MEMO.edge * s;
+    x.font = `700 ${fs}px ${MEMO.font}`;
+    const lines = wrapLines(x, text, W * MEMO.maxW - 2 * px);
+    const bw = Math.max(...lines.map((l) => x.measureText(l).width)) + 2 * px, bh = lines.length * MEMO.lh * fs + 2 * py;
+    const bx = pos[1] === 'l' ? m : W - m - bw, by = pos[0] === 't' ? m : H - m - bh;
+    x.fillStyle = MEMO.bg;
+    x.beginPath();
+    if (x.roundRect) x.roundRect(bx, by, bw, bh, MEMO.r * fs); else x.rect(bx, by, bw, bh);
+    x.fill();
+    x.fillStyle = '#fff';
+    x.textBaseline = 'middle';
+    lines.forEach((l, i) => x.fillText(l, bx + px, by + py + MEMO.lh * fs * (i + 0.5)));
+    const out = await canvasBlob(c, 'image/jpeg', 0.92);
+    c.width = c.height = 1;
+    return out || blob;
+  } finally { URL.revokeObjectURL(url); }
+}
+
 // ---------------------------------------------------------------- images
 export function canvasBlob(canvas, type = 'image/jpeg', q = 0.92) {
   return new Promise((res) => canvas.toBlob(res, type, q));
@@ -295,8 +444,8 @@ export function toast(msg, ms = 1800) {
   toast._t = setTimeout(() => t.classList.remove('show'), ms);
 }
 
-export async function shareOrDownload(blob, name) {
-  const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+export async function shareOrDownload(blob, name, lastModified) {
+  const file = new File([blob], name, { type: blob.type || 'application/octet-stream', ...(lastModified ? { lastModified } : {}) });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file], title: name }); return 'shared'; } catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }
   }

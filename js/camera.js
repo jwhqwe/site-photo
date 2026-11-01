@@ -7,6 +7,8 @@ export class Camera {
     this.stream = null;
     this.deviceId = null;
     this.lens = '1x';
+    this.zoom = 1; // 2 = 2× on the main camera
+    this.crop = 1; // when the camera cannot zoom itself, the middle of the picture is taken
   }
   get active() { return !!(this.stream && this.stream.active); }
   get track() { return this.stream ? this.stream.getVideoTracks()[0] || null : null; }
@@ -26,6 +28,21 @@ export class Camera {
     if (this.stream) for (const t of this.stream.getTracks()) t.stop();
     this.stream = null;
     this.video.srcObject = null;
+    this.zoom = 1;
+    this.crop = 1;
+    this.video.style.transform = '';
+  }
+  // 2× on the main camera: the camera's own zoom when the browser offers it, else the middle of the picture
+  async setZoom(z) {
+    this.zoom = z;
+    this.crop = 1;
+    this.video.style.transform = '';
+    const tr = this.track;
+    const caps = tr && tr.getCapabilities ? tr.getCapabilities() : null;
+    if (caps && caps.zoom && caps.zoom.max >= z) {
+      try { await tr.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min || 1, z) }] }); return; } catch (e) { /* fall back to the middle */ }
+    }
+    if (z > 1) { this.crop = z; this.video.style.transform = `scale(${z})`; }
   }
   // back cameras the browser exposes (labels are only filled in after permission)
   async lenses() {
@@ -35,8 +52,8 @@ export class Camera {
       for (const d of devs) {
         const L = (d.label || '').toLowerCase();
         if (/front|전면|facetime/.test(L)) continue;
-        if (/dual|triple|듀얼|트리플/.test(L)) continue;
-        const zoom = /ultra|초광각/.test(L) ? '0.5x' : /tele|망원/.test(L) ? '2x' : '1x';
+        if (/dual|triple|듀얼|트리플|tele|망원/.test(L)) continue;
+        const zoom = /ultra|초광각/.test(L) ? '0.5x' : '1x';
         if (!out.some((o) => o.zoom === zoom)) out.push({ id: d.deviceId, label: d.label, zoom });
       }
       return out.sort((a, b) => parseFloat(a.zoom) - parseFloat(b.zoom));
@@ -44,11 +61,12 @@ export class Camera {
   }
   async capture() {
     const v = this.video;
-    const w = v.videoWidth, h = v.videoHeight;
-    if (!w || !h) throw new Error('카메라 화면이 아직 준비되지 않았어요');
+    const W = v.videoWidth, H = v.videoHeight;
+    if (!W || !H) throw new Error('카메라 화면이 아직 준비되지 않았어요');
+    const k = this.crop || 1, w = Math.round(W / k), h = Math.round(H / k);
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
-    c.getContext('2d').drawImage(v, 0, 0, w, h);
+    c.getContext('2d').drawImage(v, (W - w) / 2, (H - h) / 2, w, h, 0, 0, w, h);
     const blob = await canvasBlob(c, 'image/jpeg', 0.92);
     const thumb = await thumbFrom(c, w, h);
     c.width = c.height = 1;

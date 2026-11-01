@@ -1,15 +1,15 @@
 // 현장 사진 — app logic. Drawings, photos and records live only in this phone's storage (IndexedDB).
 import {
   $, $$, el, uid, dayOf, today, yymmdd, timeOf, dayLabel, addDays, extOf, computeNames, csv,
-  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, ownCopy, headOf, isZipHead,
+  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
 } from './util.js';
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.4.3';
-const APP_DATE = '2026-10-27';
+const APP_VERSION = '1.5.0';
+const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
 const SPLASH_MIN_MS = 2500;
@@ -38,7 +38,7 @@ const PDF_ID = '__pdf';
 const S = {
   pkg: null, floors: [], floorCache: new Map(),
   items: [], byId: new Map(), names: null,
-  settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null },
+  settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null, zoom: 1 },
   tab: null, day: today(), planFloor: null, planSel: null, issueFilter: 'open',
   mode: 'normal', fixOf: null, tbmCount: 0,
   lastSetup: null, swReg: null,
@@ -205,7 +205,7 @@ function computeFan(st, item) {
 const DIRS = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
 function bearingText(theta) { const b = bearingOf(theta, north()); return `${DIRS[Math.round(b / 45) % 8]} ${b}°`; }
 const SRC = { members: '부재 기준', manual: '직접 지정', compass: '나침반' };
-const LENS = { '0.5x': '초광각', '1x': '광각', '2x': '망원', native: '기본 카메라', album: '앨범' };
+const LENS = { '0.5x': '0.5× 초광각', '1x': '1×', '2x': '2×', native: '기본 카메라', album: '앨범' };
 const pitchText = (p) => (p == null ? '' : `${p > 0 ? '+' : ''}${p}°${p <= -20 ? ' (아래)' : p >= 20 ? ' (위)' : ''}`);
 
 function placeText(it) {
@@ -284,6 +284,7 @@ async function startCamera() {
       saveSettings();
       await cam.start();
     }
+    if (S.settings.zoom === 2) await cam.setZoom(2).catch(() => {});
     if (S.tab !== 'camera') scheduleCamStop();
     hideCamStart();
     renderLenses();
@@ -297,20 +298,29 @@ async function startCamera() {
 async function renderLenses() {
   const box = $('#camLens');
   const L = await cam.lenses();
-  const cur = L.find((l) => l.id === cam.deviceId);
-  cam.lens = cur ? cur.zoom : '1x';
-  if (L.length < 2) { box.replaceChildren(); return; }
-  box.replaceChildren(...L.map((l) => el('button', {
-    'aria-pressed': String(!!cur && l.id === cur.id),
-    onclick: async () => {
-      if (camBusy || (cur && l.id === cur.id)) return;
-      camBusy = true;
-      try { await cam.start(l.id); S.settings.lensId = l.id; saveSettings(); }
-      catch (e) { toast('이 렌즈는 켤 수 없어요'); try { await cam.start(); } catch (e2) { /* shown on next start */ } }
-      finally { camBusy = false; }
-      renderLenses();
-    },
-  }, l.zoom.replace('x', '×'))));
+  const uw = L.find((l) => l.zoom === '0.5x'), wide = L.find((l) => l.zoom === '1x');
+  cam.lens = uw && cam.deviceId === uw.id ? '0.5x' : cam.zoom >= 2 ? '2x' : '1x';
+  // 0.5× is the ultra wide camera; 1× and 2× are the main camera
+  const opts = [...(uw ? [{ key: '0.5x', id: uw.id, z: 1 }] : []),
+    { key: '1x', id: wide ? wide.id : null, z: 1 }, { key: '2x', id: wide ? wide.id : null, z: 2 }];
+  box.replaceChildren(...opts.map((o) => el('button', {
+    'aria-pressed': String(o.key === cam.lens), onclick: () => pickLens(o),
+  }, o.key.replace('x', '×'))));
+}
+async function pickLens(o) {
+  if (camBusy || o.key === cam.lens) return;
+  camBusy = true;
+  try {
+    if (o.id ? cam.deviceId !== o.id : cam.lens === '0.5x') await cam.start(o.id || undefined);
+    await cam.setZoom(o.z);
+    S.settings.lensId = o.id || null;
+    S.settings.zoom = o.z;
+    saveSettings();
+  } catch (e) {
+    toast('이 렌즈는 켤 수 없어요');
+    try { await cam.start(); } catch (e2) { /* shown on next start */ }
+  } finally { camBusy = false; }
+  renderLenses();
 }
 
 function renderCamTop() {
@@ -431,14 +441,24 @@ async function chooseFloor(cur) {
 // ================================================================ sharing
 // Photos are kept in the app and shared later, several at once. iOS opens the share sheet
 // (이미지 저장 / 파일에 저장 / 메신저 …) only from a tap, so files are prepared first and handed over from a button.
-// Every JPEG leaves the app with its shooting date and time written inside (EXIF).
+// Every file leaves the app with its shooting date and time written inside (EXIF in a JPEG, the movie header in a video).
 async function outBlob(it, blob) {
-  if (it.kind !== 'photo') return blob;
-  try { return await withExif(blob, it.ts, it.w, it.h); } catch (e) { return blob; }
+  try {
+    if (it.kind === 'photo') return await withExif(blob, it.ts, it.w, it.h);
+    if (it.kind === 'video') return await withMovieTime(blob, it.ts);
+  } catch (e) { /* the file as it is */ }
+  return blob;
+}
+// what a share hands over: the memo drawn on the picture (unless it is turned off) and the date inside the file
+async function shareBlob(it, blob) {
+  if (it.kind === 'photo' && it.memo && !it.memoOff) {
+    try { blob = await burnMemo(blob, it.memo, await ensureMemoPos(it)); } catch (e) { /* the photo without the memo */ }
+  }
+  return outBlob(it, blob);
 }
 function shareFiles(list) {
   try {
-    const files = list.map((x) => new File([x.blob], x.name, { type: x.mime || x.blob.type || 'image/jpeg' }));
+    const files = list.map((x) => new File([x.blob], x.name, { type: x.mime || x.blob.type || 'image/jpeg', lastModified: x.ts || Date.now() }));
     if (!navigator.share || !navigator.canShare || !navigator.canShare({ files })) return Promise.resolve('unsupported');
     return navigator.share({ files }).then(() => 'shared', (e) => (e && e.name === 'AbortError' ? 'cancelled' : 'failed'));
   } catch (e) {
@@ -470,13 +490,14 @@ async function shareBatch(list) {
   try {
     for (const it of list) {
       const f = await db.get('files', it.id);
-      if (f && f.blob) files.push({ id: it.id, blob: await outBlob(it, f.blob), name: fileName.get(it.id), mime: it.mime });
+      if (f && f.blob) files.push({ id: it.id, blob: await shareBlob(it, f.blob), name: fileName.get(it.id), mime: it.mime, ts: it.ts });
       b.set(`사진을 준비하는 중… ${files.length}/${list.length}`);
     }
   } finally { b.done(); }
   if (!files.length) { toast('파일을 찾지 못했어요'); return; }
   const size = files.reduce((t, x) => t + x.blob.size, 0);
   const already = list.filter((i) => S.shared.has(i.id)).length;
+  const memos = list.filter((i) => i.kind === 'photo' && i.memo && !i.memoOff).length;
   await openDialog((box, close) => {
     const go = el('button', {
       class: 'btn primary',
@@ -490,7 +511,8 @@ async function shareBatch(list) {
     box.append(el('h3', {}, `공유 · ${files.length}개`),
       el('p', { class: 'pre' }, `${fmtBytes(size)}` + (already ? ` · 이 중 ${already}개는 전에 보낸 적이 있어요.` : '') +
         "\n사진 앱에 넣으려면 '이미지 저장', 파일로 받으려면 '파일에 저장'을 고르세요." +
-        '\n찍은 날짜·시간이 사진 안에 들어 있어서, 어디로 옮겨도 찍은 시각으로 보여요.'),
+        '\n찍은 날짜·시간이 사진·영상 파일 안에 들어 있어서 사진 앱이나 PC에서도 찍은 시각으로 보여요. 메신저에 사진으로 보내면 메신저가 이 정보를 지울 수 있어요. 그럴 땐 파일로 보내세요.' +
+        (memos ? `\n메모가 있는 사진 ${memos}장은 메모가 사진 위에 같이 들어가요.` : '')),
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
   }, { dismiss: false });
 }
@@ -685,7 +707,7 @@ async function finishSheet(later) {
     try { await C.draftP; } catch (e) { stored = false; }
     const base = S.byId.get(C.item.id) || C.item;
     const fl = await getFloor(C.floor);
-    const rec = { ...base, draft: false, memo: C.memo, floor: C.floor };
+    const rec = { ...base, ...memoPatch(base, C.memo), draft: false, floor: C.floor };
     if (later || !C.pin) {
       Object.assign(rec, { pin: null, members: [], room: null, grid: '', noMember: false, fan: null });
     } else {
@@ -773,10 +795,13 @@ async function renderViewer(full) {
     if (f && f.blob) {
       V.blob = f.blob;
       V.url = URL.createObjectURL(f.blob);
-      outBlob(it, f.blob).then((o) => { if (V.item && V.item.id === it.id) V.out = o; });
+      prepOut(it);
       media.append(it.kind === 'video'
         ? el('video', { src: V.url, controls: true, playsinline: true, preload: 'metadata' })
-        : el('img', { src: V.url, alt: nameOf(it), onerror: (e) => e.target.replaceWith(el('p', { class: 'empty' }, '사진 파일을 읽지 못했어요')) }));
+        : el('div', { class: 'v-photo' }, el('img', {
+          src: V.url, alt: nameOf(it), onload: (e) => fitPhoto(e.target),
+          onerror: (e) => e.target.parentNode.replaceWith(el('p', { class: 'empty' }, '사진 파일을 읽지 못했어요')),
+        })));
     } else media.append(el('p', { class: 'empty' }, '파일을 찾지 못했어요'));
   }
   renderViewerInfo(it);
@@ -822,6 +847,7 @@ function renderViewerActions(it) {
   }
   if (!it.tbm) A.push(btn(it.pin ? '위치 고치기' : '위치 붙이기', () => openSheet({ mode: 'edit', item: it }), it.pin ? '' : 'primary'));
   A.push(btn('메모', () => editMemo(it)));
+  if (it.kind === 'photo' && it.memo) A.push(btn(it.memoOff ? '사진에 메모 보이기' : '사진에서 메모 숨기기', () => toggleMemoOn(it)));
   A.push(btn('공유', () => shareOne(it)));
   $('#vActions').replaceChildren(...A);
 }
@@ -872,13 +898,99 @@ async function setIssue(it, v) {
 async function editMemo(it) {
   const t = await promptText('메모', it.memo || '', { placeholder: '예: 균열 0.3mm, 다음 주 재확인' });
   if (t === null) return;
-  await putItem({ ...S.byId.get(it.id), memo: t });
+  const cur = S.byId.get(it.id);
+  await putItem({ ...cur, ...memoPatch(cur, t) });
   renderCurrent();
+  if (V.item && V.item.id === it.id) { renderMemoOn(); prepOut(S.byId.get(it.id)); }
+}
+// a changed memo finds its corner again, unless it was moved by hand
+function memoPatch(it, memo) {
+  memo = memo || '';
+  if (memo === (it.memo || '')) return {};
+  return it.memoMoved ? { memo } : { memo, memoPos: null };
+}
+// where the memo goes is worked out once: the memo's place words and the calm corners of the picture, on the phone
+async function ensureMemoPos(it) {
+  const cur = S.byId.get(it.id) || it;
+  if (cur.memoPos) return cur.memoPos;
+  let img = null;
+  try { const t = await db.get('thumbs', it.id); if (t && t.blob) img = await grayOf(t.blob); } catch (e) { img = null; }
+  const pos = memoCorner(img, cur.memo);
+  const now = S.byId.get(it.id);
+  if (now && now.memo === cur.memo && !now.memoPos) await putItem({ ...now, memoPos: pos }).catch(() => {});
+  return pos;
+}
+// the viewer's photo box takes the picture's own shape, so the memo sits where it will sit in the shared file
+function fitPhoto(img) {
+  const wrap = img.parentNode;
+  if (!wrap || !img.naturalWidth) return;
+  const k = Math.min($('#vMedia').clientWidth / img.naturalWidth, (window.innerHeight * 0.58) / img.naturalHeight, 1);
+  wrap.style.width = Math.round(img.naturalWidth * k) + 'px';
+  wrap.style.height = Math.round(img.naturalHeight * k) + 'px';
+  renderMemoOn();
+}
+async function renderMemoOn() {
+  const it = V.item && S.byId.get(V.item.id);
+  const wrap = $('#vMedia .v-photo');
+  if (!it || !wrap) return;
+  for (const o of wrap.querySelectorAll('.memo-on')) o.remove();
+  if (it.kind !== 'photo' || !it.memo || it.memoOff) return;
+  const pos = await ensureMemoPos(it);
+  if (!V.item || V.item.id !== it.id || wrap.querySelector('.memo-on')) return;
+  const s = Math.min(wrap.clientWidth, wrap.clientHeight), fs = MEMO.fs * s, m = MEMO.edge * s + 'px';
+  const box = el('div', { class: 'memo-on', title: '끌어서 옮기기' }, it.memo);
+  Object.assign(box.style, { fontSize: fs + 'px', padding: `${MEMO.padY * fs}px ${MEMO.padX * fs}px`, borderRadius: MEMO.r * fs + 'px' });
+  box.style[pos[0] === 't' ? 'top' : 'bottom'] = m;
+  box.style[pos[1] === 'l' ? 'left' : 'right'] = m;
+  box.addEventListener('pointerdown', (e) => dragMemo(e, box, wrap, it.id));
+  wrap.append(box);
+}
+// drag the memo to another corner; it stays where you put it
+function dragMemo(e, box, wrap, id) {
+  e.preventDefault();
+  const r = wrap.getBoundingClientRect(), b = box.getBoundingClientRect();
+  const dx = e.clientX - b.left, dy = e.clientY - b.top;
+  let moved = false;
+  try { box.setPointerCapture(e.pointerId); } catch (err) { /* fine without */ }
+  const move = (ev) => {
+    moved = true;
+    Object.assign(box.style, { left: ev.clientX - r.left - dx + 'px', top: ev.clientY - r.top - dy + 'px', right: 'auto', bottom: 'auto' });
+  };
+  const up = async () => {
+    box.removeEventListener('pointermove', move);
+    box.removeEventListener('pointerup', up);
+    box.removeEventListener('pointercancel', up);
+    if (!moved) return;
+    const bb = box.getBoundingClientRect();
+    const pos = (bb.top + bb.height / 2 - r.top < r.height / 2 ? 't' : 'b') + (bb.left + bb.width / 2 - r.left < r.width / 2 ? 'l' : 'r');
+    const cur = S.byId.get(id);
+    if (cur) await putItem({ ...cur, memoPos: pos, memoMoved: true });
+    renderMemoOn();
+    if (V.item && V.item.id === id) prepOut(S.byId.get(id));
+  };
+  box.addEventListener('pointermove', move);
+  box.addEventListener('pointerup', up);
+  box.addEventListener('pointercancel', up);
+}
+async function toggleMemoOn(it) {
+  const cur = S.byId.get(it.id);
+  await putItem({ ...cur, memoOff: !cur.memoOff });
+  renderViewerActions(S.byId.get(it.id));
+  renderMemoOn();
+  prepOut(S.byId.get(it.id));
+}
+// the file the share button hands over is made when the viewer opens (iOS opens the share sheet only right after a tap)
+function prepOut(it) {
+  V.out = null;
+  const id = it.id, blob = V.blob;
+  if (!blob) return;
+  shareBlob(it, blob).then((o) => { if (V.item && V.item.id === id && V.blob === blob) V.out = o; },
+    () => { if (V.item && V.item.id === id && V.blob === blob) V.out = blob; });
 }
 // one photo from the viewer: the file is prepared when the viewer opens, so the tap can open the share sheet at once
 function shareOne(it) {
   if (!V.out || !V.item || V.item.id !== it.id) { toast('사진을 준비하는 중이에요. 잠시 뒤 다시 눌러 주세요'); return; }
-  shareOrDownload(V.out, nameOf(it)).then((r) => { if (r === 'shared' || r === 'downloaded') markShared([it.id]); });
+  shareOrDownload(V.out, nameOf(it), it.ts).then((r) => { if (r === 'shared' || r === 'downloaded') markShared([it.id]); });
 }
 
 // ================================================================ days tab
@@ -1795,7 +1907,7 @@ function bindUI() {
     const same = sel.every((i) => (i.memo || '') === (sel[0].memo || '')) ? sel[0].memo || '' : '';
     const t = await promptText(`메모 · ${sel.length}개`, same, { hint: '고른 사진 모두에 같은 메모를 붙여요.' });
     if (t === null) return;
-    await putRecords(sel.map((i) => ({ ...i, memo: t })));
+    await putRecords(sel.map((i) => ({ ...i, ...memoPatch(i, t) })));
     renderDays();
   };
   $('#dSelExport').onclick = () => exportItems([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
