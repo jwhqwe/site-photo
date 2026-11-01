@@ -18,7 +18,7 @@
 <div id="splash" class="splash" role="status" aria-live="polite">
   <img src="icons/icon-192.png" alt="" width="92" height="92">
   <h1>현장 사진</h1>
-  <p id="splashVer">버전 1.8.1 · 2026-11-01</p>
+  <p id="splashVer">버전 1.8.2 · 2026-11-01</p>
   <div class="splash-bar"><span></span></div>
   <small class="splash-tip">화면을 누르면 바로 시작해요</small>
 </div>
@@ -29,6 +29,7 @@
     <section id="scr-camera" class="screen cam" data-tab="camera">
       <div class="cam-view">
         <video id="camVideo" playsinline muted autoplay></video>
+        <canvas id="camScanOv" aria-hidden="true"></canvas>
         <div class="cam-top">
           <button id="camFloor" class="chip dark-chip">층 선택</button>
           <span id="camTurn" class="turn-chip" hidden>가로로 저장</span>

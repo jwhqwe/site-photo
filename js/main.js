@@ -6,12 +6,12 @@ import {
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
-import { openScan, canvasFromBlob } from './scan.js';
+import { openScan, canvasFromBlob, findPaper } from './scan.js';
 import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -49,7 +49,9 @@ const S = {
 };
 const vis = () => S.items.filter((i) => !i.draft);
 const north = () => (S.pkg && S.pkg.north && S.pkg.north.cw) || 0;
-const floorLabel = (key) => { const f = S.floors.find((x) => x.key === key); return f ? f.label : (key || ''); };
+// B3 → B3F, F1 → 1F, RF stays RF (short, fits the chips)
+const floorShort = (key) => { const m = /^B(\d+)$/.exec(key || ''); if (m) return `B${m[1]}F`; const n = /^F(\d+)$/.exec(key || ''); return n ? `${n[1]}F` : (key || ''); };
+const floorLabel = (key) => floorShort(key);
 const saveSettings = () => db.kvSet('settings', S.settings).catch(() => {});
 const r2 = (v) => Math.round(v * 100) / 100;
 const r3 = (v) => Math.round(v * 1000) / 1000;
@@ -299,7 +301,7 @@ async function startCamera() {
       saveSettings();
       await cam.start();
     }
-    if (S.settings.zoom === 2) await cam.setZoom(2).catch(() => {});
+    if (S.settings.zoom && S.settings.zoom !== 1) await cam.setZoom(S.settings.zoom).catch(() => {});
     if (S.tab !== 'camera') scheduleCamStop();
     hideCamStart();
     renderLenses();
@@ -314,9 +316,12 @@ async function renderLenses() {
   const box = $('#camLens');
   const L = await cam.lenses();
   const uw = L.find((l) => l.zoom === '0.5x'), wide = L.find((l) => l.zoom === '1x');
-  cam.lens = uw && cam.deviceId === uw.id ? '0.5x' : cam.zoom >= 2 ? '2x' : '1x';
-  // 0.5× is the ultra wide camera; 1× and 2× are the main camera
-  const opts = [...(uw ? [{ key: '0.5x', id: uw.id, z: 1 }] : []),
+  cam.lens = (uw && cam.deviceId === uw.id) || cam.zoom < 1 ? '0.5x' : cam.zoom >= 2 ? '2x' : '1x';
+  // 0.5× is the ultra wide camera; 1× and 2× are the main camera. Without a separate ultra wide camera,
+  // a camera whose own zoom goes below 1 gives 0.5× by zooming out.
+  const caps = cam.track && cam.track.getCapabilities ? cam.track.getCapabilities() : null;
+  const zoomOut = !uw && caps && caps.zoom && caps.zoom.min < 1;
+  const opts = [...(uw ? [{ key: '0.5x', id: uw.id, z: 1 }] : zoomOut ? [{ key: '0.5x', id: wide ? wide.id : null, z: Math.max(0.5, caps.zoom.min) }] : []),
     { key: '1x', id: wide ? wide.id : null, z: 1 }, { key: '2x', id: wide ? wide.id : null, z: 2 }];
   box.replaceChildren(...opts.map((o) => el('button', {
     'aria-pressed': String(o.key === cam.lens), onclick: () => pickLens(o),
@@ -326,7 +331,7 @@ async function pickLens(o) {
   if (camBusy || o.key === cam.lens) return;
   camBusy = true;
   try {
-    if (o.id ? cam.deviceId !== o.id : cam.lens === '0.5x') await cam.start(o.id || undefined);
+    if (o.id ? cam.deviceId !== o.id : cam.lens === '0.5x' && cam.zoom >= 1) await cam.start(o.id || undefined);
     await cam.setZoom(o.z);
     S.settings.lensId = o.id || null;
     S.settings.zoom = o.z;
@@ -533,6 +538,44 @@ function renderCamScan() {
   b.setAttribute('aria-pressed', String(S.scan));
   b.textContent = S.scan ? '문서 스캔 켬' : '문서 스캔';
 }
+// scan mode: the page outline drawn live on the viewfinder, found the same way as after the shot
+let scanLive = 0;
+function scanLoop() {
+  clearInterval(scanLive);
+  scanLive = 0;
+  const ov = $('#camScanOv');
+  const g = ov.getContext('2d');
+  const clear = () => { g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, ov.width, ov.height); };
+  clear();
+  if (!S.scan || S.tab !== 'camera') return;
+  const small = document.createElement('canvas');
+  const sg = small.getContext('2d', { willReadFrequently: true });
+  scanLive = setInterval(() => {
+    if (!S.scan || S.tab !== 'camera') { scanLoop(); return; }
+    const v = cam.video;
+    if (!cam.active || !v.videoWidth || document.hidden) return;
+    const z = cam.crop || 1, vw = v.videoWidth, vh = v.videoHeight, sw = vw / z, sh = vh / z, k = 160 / Math.max(sw, sh);
+    small.width = Math.round(sw * k);
+    small.height = Math.round(sh * k);
+    sg.drawImage(v, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, small.width, small.height);
+    const q = findPaper(sg.getImageData(0, 0, small.width, small.height).data, small.width, small.height);
+    const W = ov.clientWidth, H = ov.clientHeight, dpr = window.devicePixelRatio || 1;
+    if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+    clear();
+    ov.dataset.found = q ? '1' : '';
+    if (!q) return;
+    const s = Math.min(W / vw, H / vh), ox = (W - vw * s) / 2, oy = (H - vh * s) / 2;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.beginPath();
+    q.forEach(([x, y], i) => { const X = ox + x * vw * s, Y = oy + y * vh * s; if (i) g.lineTo(X, Y); else g.moveTo(X, Y); });
+    g.closePath();
+    g.fillStyle = 'rgba(255,90,31,0.16)';
+    g.fill();
+    g.lineWidth = 3;
+    g.strokeStyle = '#FF5A1F';
+    g.stroke();
+  }, 350);
+}
 async function scanAndSave(c) {
   const r = await openScan(c);
   c.width = c.height = 1;
@@ -568,7 +611,7 @@ function startFix(it) {
 function cancelFix() { S.mode = 'normal'; S.fixOf = null; renderCamBanner(); }
 
 async function chooseFloor(cur) {
-  return choose('층 고르기', S.floors.map((f) => ({ label: f.label, value: f.key, desc: f.sheet, current: f.key === cur })));
+  return choose('층 고르기', S.floors.map((f) => ({ label: floorShort(f.key), value: f.key, desc: `${f.label} · ${f.sheet}`, current: f.key === cur })));
 }
 
 // ================================================================ sharing
@@ -992,6 +1035,7 @@ function renderViewerActions(it) {
   if (!it.tbm && !it.doc) A.push(btn(it.pin ? '위치 고치기' : '위치 붙이기', () => openSheet({ mode: 'edit', item: it }), it.pin ? '' : 'primary'));
   A.push(btn('메모', () => editMemo(it)));
   if (it.kind === 'photo' && it.memo) A.push(btn(it.memoOff ? '사진에 메모 보이기' : '사진에서 메모 숨기기', () => toggleMemoOn(it)));
+  if (it.kind === 'photo') A.push(btn('돌리기 ↻', () => rotateItem(it)));
   A.push(btn('공유', () => shareOne(it)));
   $('#vActions').replaceChildren(...A);
 }
@@ -1204,6 +1248,25 @@ function dragMemo(e, box, wrap, id) {
   box.addEventListener('pointerup', up);
   box.addEventListener('pointercancel', up);
 }
+// a quarter turn clockwise: only the Exif orientation changes, so the picture itself is not re-saved
+let rotating = false;
+async function rotateItem(it) {
+  if (rotating) return;
+  rotating = true;
+  try {
+    const cur = S.byId.get(it.id), f = await db.get('files', it.id);
+    if (!cur || !f || !f.blob) return;
+    const blob = await turnJpeg(f.blob, 90, cur.ts);
+    if (blob === f.blob) { toast('이 사진은 돌릴 수 없어요'); return; }
+    const t = await imageThumb(blob);
+    await putItem({ ...cur, w: t.w, h: t.h, memoPos: null, memoMoved: false }, blob, t.thumb);
+    dropThumb(it.id);
+    if (V.item && V.item.id === it.id) await renderViewer(true);
+    renderCurrent();
+  } catch (e) {
+    toast('돌리지 못했어요');
+  } finally { rotating = false; }
+}
 async function toggleMemoOn(it) {
   const cur = S.byId.get(it.id);
   await putItem({ ...cur, memoOff: !cur.memoOff });
@@ -1355,7 +1418,7 @@ function bindDragSelect() {
   const root = $('#scr-days');
   root.addEventListener('pointerdown', (e) => {
     const c = e.target.closest ? e.target.closest('.cell[data-id]') : null;
-    if (!c || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (!c || c.closest('#tbmCard') || (e.pointerType === 'mouse' && e.button !== 0)) return; // the TBM row scrolls sideways; taps still select
     cancelAnimationFrame(DS.glide);
     DS.pending = { x0: e.clientX, y0: e.clientY, id: c.dataset.id, pid: e.pointerId };
     DS.x = e.clientX; DS.y = e.clientY;
@@ -1510,7 +1573,7 @@ function renderPlanChips() {
       $('#pSheet').hidden = true;
       renderPlanTab();
     },
-  }, f.label, counts.get(f.key) ? el('small', {}, ' ' + counts.get(f.key)) : null)));
+  }, floorShort(f.key), counts.get(f.key) ? el('small', {}, ' ' + counts.get(f.key)) : null)));
 }
 function drawPlanStatic(g) {
   const fl = PV.floor;
@@ -2041,7 +2104,7 @@ async function renderMore() {
     parts.push(group('도면',
       el('p', {}, S.pkg.project || ''),
       el('p', {}, `${S.pkg.source || ''}`),
-      el('p', {}, `층: ${S.floors.map((f) => f.label).join(', ')} · 도면 파일 ${S.pkg.created || ''}`),
+      el('p', {}, `층: ${S.floors.map((f) => floorShort(f.key)).join(', ')} · 도면 파일 ${S.pkg.created || ''}`),
       btns(btn('도면 파일 다시 가져오기', async () => { const [f] = await pickFiles(); if (f && (await importPackage(f))) renderMore(); }))));
   }
   const seg = el('div', { class: 'seg' },
@@ -2049,10 +2112,16 @@ async function renderMore() {
       'aria-pressed': String(S.settings.capture === v),
       onclick: () => { S.settings.capture = v; saveSettings(); renderMore(); },
     }, l)));
+  // which back cameras Safari shows (if 0.5× is missing, this says why)
+  const camList = el('p', { class: 'muted' }, '');
+  navigator.mediaDevices && navigator.mediaDevices.enumerateDevices().then((ds) => {
+    const n = ds.filter((d) => d.kind === 'videoinput' && d.label).map((d) => d.label);
+    camList.textContent = n.length ? `사파리가 보여주는 카메라: ${n.join(', ')}` : '';
+  }).catch(() => {});
   parts.push(group('촬영 방식',
-    el('p', {}, '앱 카메라: 찍자마자 도면이 떠서 빨라요. 기본 카메라: 화질이 가장 좋고 음량 버튼으로 찍을 수 있어요. 영상은 늘 기본 카메라로 찍어요.'),
+    el('p', {}, '앱 카메라: 찍자마자 도면이 떠서 빨라요. 기본 카메라: 아이폰 카메라 앱 그대로이고 음량 버튼으로 찍을 수 있어요.'),
     el('p', {}, '앱 카메라는 아이폰이 앱을 열 때마다 카메라 허용을 물어봐요(아이폰이 홈 화면 앱의 허용을 기억하지 않아요). 기본 카메라는 묻지 않아요.'),
-    seg));
+    seg, camList));
   const hasSensor = sensors.heading != null;
   const tbmName = S.settings.tbmName || '건축';
   parts.push(group('TBM 사진 이름',
@@ -2120,6 +2189,7 @@ function showTab(t) {
   $$('.screen').forEach((s) => s.classList.toggle('on', s.dataset.tab === t));
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
   if (prev === 'camera' && t !== 'camera') scheduleCamStop();
+  if (prev !== t && (prev === 'camera' || t === 'camera')) scanLoop();
   // TBM shots are taken in one go: leaving the camera ends TBM mode, so it does not greet you next time
   if (t !== 'camera' && S.mode === 'tbm') { S.mode = 'normal'; renderCamBanner(); }
   if (t !== 'camera' && cam.recording) finishRecording(); // leaving the camera ends the video
@@ -2154,7 +2224,7 @@ function bindUI() {
   $('#camShutter').onclick = onShutter;
   $('#camNative').onclick = () => shootNative('photo');
   $('#camVideoBtn').onclick = () => toggleRecord();
-  $('#camScan').onclick = () => { S.scan = !S.scan; renderCamScan(); if (S.scan) toast('종이 전체가 보이게 찍어 주세요'); };
+  $('#camScan').onclick = () => { S.scan = !S.scan; renderCamScan(); scanLoop(); if (S.scan) toast('종이 전체가 보이게 찍어 주세요'); };
   $('#camFloor').onclick = async () => {
     const k = await chooseFloor(S.settings.capFloor);
     if (k) { S.settings.capFloor = k; saveSettings(); renderCamTop(); }

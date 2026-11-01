@@ -5,10 +5,14 @@ import { el, canvasBlob, thumbFrom } from './util.js';
 const DEFAULT_QUAD = [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
-// the paper: the largest bright patch of a small copy (Otsu threshold), its four extreme points
-export function findPaper(d, w, h) {
-  const n = w * h, g = new Uint8Array(n), hist = new Uint32Array(256);
-  for (let i = 0; i < n; i++) { const v = ((d[4 * i] * 3 + d[4 * i + 1] * 6 + d[4 * i + 2]) / 10) | 0; g[i] = v; hist[v]++; }
+// Finding the paper, two ways, the better one wins:
+//  A. how different each pixel is from the desk (the median colour of the picture's outer ring) — paper on any desk;
+//  B. plain brightness — white paper on a darker desk.
+// Each: Otsu threshold → holes closed → largest patch → four extreme points → each side refitted to the patch's edge.
+// Scored by how well the patch fills its quadrilateral (a sheet of paper fills it almost exactly).
+function otsu(v) {
+  const hist = new Uint32Array(256), n = v.length;
+  for (let i = 0; i < n; i++) hist[v[i]]++;
   let sum = 0;
   for (let t = 0; t < 256; t++) sum += t * hist[t];
   let sB = 0, wB = 0, best = -1, th = 128;
@@ -18,26 +22,50 @@ export function findPaper(d, w, h) {
     const wF = n - wB;
     if (!wF) break;
     sB += t * hist[t];
-    const v = wB * wF * (sB / wB - (sum - sB) / wF) ** 2;
-    if (v > best) { best = v; th = t; }
+    const s = wB * wF * (sB / wB - (sum - sB) / wF) ** 2;
+    if (s > best) { best = s; th = t; }
   }
+  return th;
+}
+const polyArea = (q) => Math.abs(q.reduce((s, p, i) => { const r = q[(i + 1) % 4]; return s + p[0] * r[1] - r[0] * p[1]; }, 0)) / 2;
+function quadOf(v, w, h) {
+  const n = w * h, th = otsu(v);
+  let m = new Uint8Array(n);
+  for (let i = 0; i < n; i++) m[i] = v[i] > th ? 1 : 0;
+  const morph = (src, keep) => { // 3×3 dilate (keep = 1) or erode (keep = 0)
+    const out = new Uint8Array(n);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let hit = keep ? 0 : 1;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy;
+        const s = xx < 0 || yy < 0 || xx >= w || yy >= h ? 0 : src[yy * w + xx];
+        if (keep && s) hit = 1; else if (!keep && !s) hit = 0;
+      }
+      out[y * w + x] = hit;
+    }
+    return out;
+  };
+  m = morph(morph(m, 1), 0); // text and lines on the page no longer split it
   const lab = new Int32Array(n).fill(-1), stack = new Int32Array(n);
   let comp = 0, bestC = -1, bestN = 0;
   for (let s = 0; s < n; s++) {
-    if (g[s] <= th || lab[s] !== -1) continue;
+    if (!m[s] || lab[s] !== -1) continue;
     let top = 0, cnt = 0;
     stack[top++] = s; lab[s] = comp;
     while (top) {
       const p = stack[--top], x = p % w;
       cnt++;
-      const nb = [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, p - w, p + w];
-      for (const q of nb) if (q >= 0 && q < n && g[q] > th && lab[q] === -1) { lab[q] = comp; stack[top++] = q; }
+      if (x > 0 && m[p - 1] && lab[p - 1] === -1) { lab[p - 1] = comp; stack[top++] = p - 1; }
+      if (x < w - 1 && m[p + 1] && lab[p + 1] === -1) { lab[p + 1] = comp; stack[top++] = p + 1; }
+      if (p >= w && m[p - w] && lab[p - w] === -1) { lab[p - w] = comp; stack[top++] = p - w; }
+      if (p < n - w && m[p + w] && lab[p + w] === -1) { lab[p + w] = comp; stack[top++] = p + w; }
     }
     if (cnt > bestN) { bestN = cnt; bestC = comp; }
     comp++;
   }
-  if (bestN < n * 0.12 || bestN > n * 0.97) return null;
+  if (bestN < n * 0.1 || bestN > n * 0.95) return null;
   let tl = [0, 0, Infinity], tr = [0, 0, -Infinity], br = [0, 0, -Infinity], bl = [0, 0, Infinity];
+  const edge = [];
   for (let p = 0; p < n; p++) {
     if (lab[p] !== bestC) continue;
     const x = p % w, y = (p / w) | 0, a = x + y, b = x - y;
@@ -45,8 +73,48 @@ export function findPaper(d, w, h) {
     if (a > br[2]) br = [x, y, a];
     if (b > tr[2]) tr = [x, y, b];
     if (b < bl[2]) bl = [x, y, b];
+    if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || lab[p - 1] !== bestC || lab[p + 1] !== bestC || lab[p - w] !== bestC || lab[p + w] !== bestC) edge.push([x, y]);
   }
-  return [tl, tr, br, bl].map(([x, y]) => [(x + 0.5) / w, (y + 0.5) / h]);
+  let q = [tl, tr, br, bl].map(([x, y]) => [x, y]);
+  // each side refitted to the edge points near it, corners where the sides meet
+  const lines = [];
+  for (let k = 0; k < 4; k++) {
+    const a = q[k], b = q[(k + 1) % 4], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (L < 4) { lines.length = 0; break; }
+    const ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L;
+    const pts = edge.filter(([x, y]) => { const t = ((x - a[0]) * ux + (y - a[1]) * uy) / L, d = Math.abs((x - a[0]) * uy - (y - a[1]) * ux); return t > 0.12 && t < 0.88 && d < Math.max(2, L * 0.06); });
+    if (pts.length < 6) { lines.length = 0; break; }
+    const mx = pts.reduce((s, p) => s + p[0], 0) / pts.length, my = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    let sxx = 0, sxy = 0, syy = 0;
+    for (const [x, y] of pts) { sxx += (x - mx) ** 2; sxy += (x - mx) * (y - my); syy += (y - my) ** 2; }
+    const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    lines.push([mx, my, Math.cos(ang), Math.sin(ang)]);
+  }
+  if (lines.length === 4) {
+    const meet = (l1, l2) => { const den = l1[2] * l2[3] - l1[3] * l2[2]; if (Math.abs(den) < 1e-6) return null; const t = ((l2[0] - l1[0]) * l2[3] - (l2[1] - l1[1]) * l2[2]) / den; return [l1[0] + t * l1[2], l1[1] + t * l1[3]]; };
+    const r = [meet(lines[3], lines[0]), meet(lines[0], lines[1]), meet(lines[1], lines[2]), meet(lines[2], lines[3])];
+    if (r.every((p, i) => p && Math.hypot(p[0] - q[i][0], p[1] - q[i][1]) < Math.min(w, h) * 0.15)) q = r;
+  }
+  const score = bestN / Math.max(1, polyArea(q));
+  return { q: q.map(([x, y]) => [Math.min(1, Math.max(0, (x + 0.5) / w)), Math.min(1, Math.max(0, (y + 0.5) / h))]), score: Math.min(score, 2 - score) };
+}
+export function findPaper(d, w, h) {
+  const n = w * h, bw = Math.max(2, Math.round(Math.min(w, h) * 0.05));
+  const ring = [[], [], []];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (x >= bw && y >= bw && x < w - bw && y < h - bw) continue;
+    const i = (y * w + x) * 4;
+    ring[0].push(d[i]); ring[1].push(d[i + 1]); ring[2].push(d[i + 2]);
+  }
+  const bg = ring.map((a) => a.sort((p, q) => p - q)[a.length >> 1]), bgL = (bg[0] * 3 + bg[1] * 6 + bg[2]) / 10;
+  const dist = new Uint8Array(n), lum = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = d[4 * i], g = d[4 * i + 1], b = d[4 * i + 2], l = (r * 3 + g * 6 + b) / 10;
+    lum[i] = l;
+    dist[i] = Math.min(255, (Math.abs(r - bg[0]) + Math.abs(g - bg[1]) + Math.abs(b - bg[2])) * 0.5 + Math.max(0, l - bgL) * 0.8);
+  }
+  const c = [quadOf(dist, w, h), quadOf(lum, w, h)].filter((x) => x && x.score > 0.8).sort((a, b) => b.score - a.score);
+  return c.length ? c[0].q : null;
 }
 
 // corners in reading order (top left, top right, bottom right, bottom left), whatever order they were dragged into

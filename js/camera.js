@@ -53,7 +53,7 @@ export class Camera {
         const L = (d.label || '').toLowerCase();
         if (/front|전면|facetime/.test(L)) continue;
         if (/dual|triple|듀얼|트리플|tele|망원/.test(L)) continue;
-        const zoom = /ultra|초광각/.test(L) ? '0.5x' : '1x';
+        const zoom = /ultra|울트라|초광각/.test(L) ? '0.5x' : '1x';
         if (!out.some((o) => o.zoom === zoom)) out.push({ id: d.deviceId, label: d.label, zoom });
       }
       return out.sort((a, b) => parseFloat(a.zoom) - parseFloat(b.zoom));
