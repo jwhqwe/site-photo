@@ -18,7 +18,7 @@
 <div id="splash" class="splash" role="status" aria-live="polite">
   <img src="icons/icon-192.png" alt="" width="92" height="92">
   <h1>현장 사진</h1>
-  <p id="splashVer">버전 1.8.2 · 2026-11-01</p>
+  <p id="splashVer">버전 1.9.0 · 2026-11-01</p>
   <div class="splash-bar"><span></span></div>
   <small class="splash-tip">화면을 누르면 바로 시작해요</small>
 </div>
@@ -102,11 +102,10 @@
         <span id="tCount" class="t-count"></span>
       </header>
       <div class="scroll">
+        <form id="tAdd" class="todo-add"><input id="tInput" placeholder="할 일 추가" enterkeyhint="done" autocomplete="off" aria-label="할 일 추가"><button class="btn primary" type="submit">추가</button></form>
         <div id="tCarry" class="banner" hidden></div>
         <div id="tList" class="todo-list"></div>
         <p id="tEmpty" class="empty" hidden>이날 할 일이 없어요.</p>
-        <form id="tAdd" class="todo-add"><input id="tInput" placeholder="할 일 추가" enterkeyhint="done" autocomplete="off" aria-label="할 일 추가"><button class="btn primary" type="submit">추가</button></form>
-        <p class="todo-help">동그라미를 누를 때마다 했음 ✓ → 못 함 ✕ → 할 일로 바뀌어요. 글자를 누르면 고치거나, 변동 사항을 메모하거나, 다른 날로 넘길 수 있어요.</p>
       </div>
     </section>
 

@@ -1,7 +1,7 @@
 // 현장 사진 — app logic. Drawings, photos and records live only in this phone's storage (IndexedDB).
 import {
   $, $$, el, uid, dayOf, today, yymmdd, timeOf, dayLabel, addDays, extOf, computeNames, csv,
-  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, turnMovie, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
+  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, turnMovie, shotTime, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
 } from './util.js';
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '1.9.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -371,6 +371,10 @@ function renderCamBanner() {
     b.className = 'cam-banner tbm';
     b.replaceChildren(el('span', {}, `TBM 사진 찍는 중 · 오늘 ${S.tbmCount}장`), el('button', { onclick: endTbm }, 'TBM 끝내기 ✕'));
     b.hidden = false;
+  } else if (S.mode === 'target' && S.target) {
+    b.className = 'cam-banner tbm';
+    b.replaceChildren(el('span', {}, `${S.target.mark} 사진 찍는 중 · ${floorShort(S.target.floor)} · ${S.targetCount}장`), el('button', { onclick: endTarget }, '끝내기 ✕'));
+    b.hidden = false;
   } else if (S.mode === 'fix') {
     const o = S.byId.get(S.fixOf);
     b.className = 'cam-banner';
@@ -450,6 +454,16 @@ async function onCaptured(media) {
     renderCamBanner();
     renderCamLast();
     toast(`TBM 사진 저장 (${S.tbmCount}장)`);
+    return;
+  }
+  if (S.mode === 'target' && S.target) {
+    const it = newRecord(media, ts, { ...targetFields(S.target), heading: snap.heading, pitch: snap.pitch });
+    try { await putItem(it, media.blob, media.thumb); }
+    catch (e) { alertBox('저장하지 못했어요', (e && e.message) || '저장 공간이 부족할 수 있어요.'); return; }
+    S.targetCount++;
+    renderCamBanner();
+    renderCamLast();
+    toast(`${S.target.mark} 사진 저장 (${S.targetCount}장)`);
     return;
   }
   const it = newRecord(media, ts, { heading: snap.heading, pitch: snap.pitch, draft: true });
@@ -985,7 +999,7 @@ async function renderViewer(full) {
           src: V.url, alt: nameOf(it), draggable: 'false', onload: (e) => fitPhoto(e.target),
           onerror: (e) => e.target.parentNode.replaceWith(el('p', { class: 'empty' }, '사진 파일을 읽지 못했어요')),
         })));
-    } else media.append(el('p', { class: 'empty' }, '파일을 찾지 못했어요'));
+    } else media.append(el('p', { class: 'empty' }, it.offloaded ? `원본은 iCloud Drive의 ${it.offloaded.zip}에 있어요` : '파일을 찾지 못했어요'));
     const list = dayList(it), k = list.findIndex((i) => i.id === it.id);
     if (list.length > 1) media.append(el('span', { class: 'v-pos' }, `${k + 1} / ${list.length}`));
   }
@@ -999,6 +1013,7 @@ function renderViewerInfo(it) {
   const rows = [];
   const add = (k, ...v) => { if (v.length && v[0] != null && v[0] !== '') rows.push(el('span', { class: 'k' }, k), el('span', { class: 'v' }, ...v)); };
   add('날짜', `${dayLabel(it.day)} ${timeOf(it.ts)}`);
+  if (it.offloaded) add('원본', `iCloud Drive · ${it.offloaded.zip} (폰에는 작은 사진)`);
   if (it.tbm) add('구분', 'TBM');
   if (it.doc) add('구분', '문서 스캔');
   if (it.fixOf) add('구분', '조치 후 사진');
@@ -1353,7 +1368,16 @@ function renderDays() {
     day === today() ? el('button', { class: 'add', onclick: startTbm }, '+ 찍기') : null,
     el('button', { class: 'add', onclick: () => importMedia(day, true) }, '+ 앨범'),
     ...tbm.map((it) => cellFor(it, { selectable: true })));
-  card.replaceChildren(el('h3', {}, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요')), row);
+  // the row folds away with the arrow (remembered)
+  const open = !S.settings.tbmFold;
+  row.hidden = !open;
+  const chev = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  chev.setAttribute('width', '18'); chev.setAttribute('height', '18'); chev.setAttribute('viewBox', '0 0 24 24'); chev.setAttribute('aria-hidden', 'true');
+  chev.innerHTML = '<path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>';
+  card.replaceChildren(el('h3', {}, el('button', {
+    class: 'fold', 'aria-expanded': String(open), 'aria-label': open ? 'TBM 접기' : 'TBM 펼치기',
+    onclick: () => { S.settings.tbmFold = open; saveSettings(); renderCurrent(); },
+  }, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요'), chev)), row);
 
   $('#dGrid').replaceChildren(...rest.map((it) => cellFor(it, { selectable: true })));
   $('#dEmpty').hidden = rest.length > 0;
@@ -1526,7 +1550,7 @@ async function openCalendar() {
 }
 
 // photos taken outside the app (or TBM shot with the phone camera) for a given day
-async function importMedia(day, tbm) {
+async function importMedia(day, tbm, target = null) {
   const files = await pickFiles({ accept: tbm ? 'image/*' : 'image/*,video/*', multiple: true });
   if (!files.length) return;
   const b = busy('사진 넣는 중…');
@@ -1536,19 +1560,42 @@ async function importMedia(day, tbm) {
       const isVideo = /^video\//.test(f.type);
       let t = { thumb: null, w: 0, h: 0 };
       try { t = isVideo ? await videoThumb(f) : await imageThumb(f); } catch (e) { /* no thumbnail */ }
-      const ts = f.lastModified && dayOf(f.lastModified) === day ? f.lastModified : dayStart(day) + 8 * 3600e3 + k * 1000;
+      const shot = isVideo ? null : await shotTime(f);
+      // onto a member: the photo keeps its own date; into a day: its own time if it was taken that day
+      const ts = target ? (shot || f.lastModified || Date.now()) + k
+        : shot && dayOf(shot) === day ? shot : f.lastModified && dayOf(f.lastModified) === day ? f.lastModified : dayStart(day) + 8 * 3600e3 + k * 1000;
       const blob = isVideo ? f : await outBlob({ kind: 'photo', ts, w: t.w, h: t.h }, f);
       const media = { blob, kind: isVideo ? 'video' : 'photo', mime: f.type || 'image/jpeg', lens: 'album', w: t.w, h: t.h };
-      await putItem(newRecord(media, ts, tbm ? { tbm: true, floor: null } : {}), blob, t.thumb);
+      await putItem(newRecord(media, ts, target ? targetFields(target) : tbm ? { tbm: true, floor: null } : {}), blob, t.thumb);
       k++;
       b.set(`사진 넣는 중… ${k}/${files.length}`);
     }
   } catch (e) {
     alertBox('일부만 넣었어요', `${k}개를 넣었어요. ${(e && e.message) || ''}`);
   } finally { b.done(); }
-  if (k) toast(tbm ? `TBM 사진 ${k}장을 넣었어요` : `${k}개를 넣었어요. 위치는 사진을 눌러 붙이세요.`, 2600);
+  if (k) toast(target ? `${target.mark}에 ${k}개를 올렸어요` : tbm ? `TBM 사진 ${k}장을 넣었어요` : `${k}개를 넣었어요. 위치는 사진을 눌러 붙이세요.`, 2600);
   renderCurrent();
+  if (target && S.tab === 'plan' && S.planTap) onPlanTap(S.planTap);
 }
+
+// photos straight onto a member chosen on the drawing tab: the location is the member, no location step
+function targetOf(fl, m) {
+  const c = centroid(m.pts).map(r2), room = PV.roomAt(c);
+  return {
+    floor: fl.key, mark: m.mark || m.type || '부재', pin: c, members: [{ id: m.id, mark: m.mark || '', type: m.type, at: c, c }],
+    room: room ? { code: room.code || '', name: room.name || '', type: room.type || '' } : null, grid: PV.gridOf(c),
+  };
+}
+const targetFields = (t) => ({ floor: t.floor, pin: t.pin.slice(), members: t.members.map((m) => ({ ...m })), room: t.room, grid: t.grid, noMember: false, fan: null });
+function startTarget(t) {
+  S.mode = 'target';
+  S.target = t;
+  S.targetCount = 0;
+  S.fixOf = null;
+  showTab('camera');
+  renderCamBanner();
+}
+function endTarget() { S.mode = 'normal'; S.target = null; renderCamBanner(); }
 
 // ================================================================ plan tab
 let planPins = [];
@@ -1615,23 +1662,28 @@ function drawPlanDynamic(g, px) {
 function onPlanTap(p) {
   const fl = PV.floor;
   if (!fl) return;
+  S.planTap = p;
   const located = vis().filter((i) => i.floor === fl.key && i.pin);
   const m = PV.hitMember(p);
-  let list = [], title = '';
+  let list = [], title = '', target = null;
   if (m) {
+    // a member always opens its sheet, with + 찍기 · + 앨범 to put photos straight onto it
+    target = targetOf(fl, m);
     list = located.filter((i) => (i.members || []).some((r) => r.id === m.id));
-    if (list.length) { title = `${m.mark || m.type} · ${list.length}장`; S.planSel = { floor: fl.key, memberId: m.id }; }
+    S.planSel = { floor: fl.key, memberId: m.id };
+    const near = list.length ? [] : located.filter((i) => Math.hypot(i.pin[0] - p[0], i.pin[1] - p[1]) < 22 * PV.ptPerPx());
+    title = `${target.mark} · ${list.length ? `${list.length}장` : near.length ? `사진 없음 · 근처 ${near.length}장` : '사진 없음'}`;
+    if (near.length) list = near;
     const spec = colSpec(fl.key, m.mark);
-    if (spec && !list.length) { S.planSel = null; $('#pSheet').hidden = true; PV.refresh(); toast(`${m.mark} · ${spec}`, 4500); return; }
     if (spec) title += `\n${spec}`;
   }
-  if (!list.length) {
+  if (!list.length && !target) {
     const tol = 22 * PV.ptPerPx();
     list = located.filter((i) => Math.hypot(i.pin[0] - p[0], i.pin[1] - p[1]) < tol);
     if (list.length) { const room = PV.roomAt(p); title = `${room ? room.name : '이 자리'} · ${list.length}장`; S.planSel = { floor: fl.key, p }; }
   }
   const sh = $('#pSheet');
-  if (!list.length) {
+  if (!list.length && !target) {
     const room = PV.roomAt(p);
     S.planSel = null;
     sh.hidden = true;
@@ -1641,7 +1693,9 @@ function onPlanTap(p) {
   }
   list.sort((a, b) => b.ts - a.ts);
   $('#pSheetTitle').textContent = title;
-  $('#pSheetList').replaceChildren(...list.map((it) => cellFor(it, { label: md(it.day), onClick: () => openViewer(it.id) })));
+  $('#pSheetList').replaceChildren(
+    ...(target ? [el('button', { class: 'add', onclick: () => startTarget(target) }, '+ 찍기'), el('button', { class: 'add', onclick: () => importMedia(today(), false, target) }, '+ 앨범')] : []),
+    ...list.map((it) => cellFor(it, { label: md(it.day), onClick: () => openViewer(it.id) })));
   sh.hidden = false;
   PV.refresh();
 }
@@ -1796,6 +1850,92 @@ async function makeBackup(send = false) {
   }
 }
 
+// ---------------------------------------------------------------- phone storage: originals moved to iCloud Drive
+// The originals go into a ZIP the user saves with "파일에 저장" (iCloud Drive); the phone keeps a small copy (long side
+// 1600 px) to look at, share and print. Restoring that ZIP (백업에서 복원) puts the originals back, here or on the iPad.
+// A web app cannot write to iCloud by itself, so this is one tap on the share sheet each time.
+const KEEP_PX = 1600, MOVE_MAX = 400 * 1024 * 1024;
+async function smallCopy(it, blob) {
+  if (it.kind !== 'photo') return null;
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, KEEP_PX / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * k);
+    c.height = Math.round(img.naturalHeight * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    const j = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.82));
+    const w = c.width, h = c.height;
+    c.width = c.height = 1;
+    return j ? withExif(j, it.ts, w, h) : null;
+  } finally { URL.revokeObjectURL(url); }
+}
+async function moveOut() {
+  const cut = await choose('어떤 사진의 원본을 옮길까요?', [
+    { label: '일주일 지난 것', value: 7 }, { label: '사흘 지난 것', value: 3 }, { label: '오늘 것 빼고 전부', value: 1 }]);
+  if (!cut) return;
+  const before = dayOf(Date.now() - (cut - 1) * 86400e3);
+  const cand = vis().filter((i) => !i.offloaded && i.day < before).sort((a, b) => a.ts - b.ts);
+  if (!cand.length) { toast('옮길 원본이 없어요', 2400); return; }
+  const b = busy('원본 묶는 중…');
+  let zip, name, items = [];
+  try {
+    const entries = [], files = {};
+    let total = 0;
+    for (const it of cand) {
+      const f = await db.get('files', it.id);
+      if (!f || !f.blob) continue;
+      if (items.length && total + f.blob.size > MOVE_MAX) break; // one ZIP at a time stays small enough for Safari
+      total += f.blob.size;
+      items.push(it);
+      const path = `${it.day}/${nameOf(it)}`;
+      files[it.id] = path;
+      entries.push({ name: path, blob: f.blob, date: new Date(it.ts) });
+      const t = await db.get('thumbs', it.id);
+      if (t) entries.push({ name: `thumbs/${it.id}.jpg`, blob: t.blob, date: new Date(it.ts) });
+    }
+    if (!items.length) { b.done(); toast('옮길 원본이 없어요', 2400); return; }
+    entries.unshift({ name: 'backup.json', text: JSON.stringify({ format: 'fieldphoto-backup', version: 1, kind: 'originals', app: APP_VERSION, created: new Date().toISOString(), items, files }) });
+    zip = await makeZip(entries, (i, n) => b.set(`원본 묶는 중… ${i}/${n}`));
+    const d0 = yymmdd(items[0].day), d1 = yymmdd(items[items.length - 1].day);
+    name = `현장사진_원본_${d0 === d1 ? d0 : d0 + '-' + d1}.zip`;
+  } catch (e) {
+    b.done();
+    alertBox('원본을 묶지 못했어요', (e && e.message) || String(e));
+    return;
+  }
+  b.done();
+  const more = cand.length - items.length;
+  const r = await offerFile(zip, name, '원본 ZIP 준비 완료',
+    `사진·영상 ${items.length}개 · ${fmtBytes(zip.size)}${more ? `\n(${more}개는 다음에 한 번 더 옮겨요)` : ''}\n"파일에 저장" → iCloud Drive를 고르세요.`);
+  if (r !== 'shared' && r !== 'downloaded') return;
+  const ok = await confirmBox('iCloud Drive에 저장했나요?',
+    `저장했으면 이 폰에서 원본 ${items.length}개를 비우고, 보기용 작은 사진만 남겨요(영상은 첫 장면만). 원본이 다시 필요하면 "${name}"을 백업에서 복원하세요.`, '원본 비우기');
+  if (!ok) return;
+  const b2 = busy('원본 비우는 중…');
+  let n = 0;
+  try {
+    for (const it of items) {
+      const cur = S.byId.get(it.id), f = await db.get('files', it.id);
+      if (!cur || !f || !f.blob) continue;
+      const small = await smallCopy(cur, f.blob).catch(() => null);
+      // mt stays: moving the original out is not a change to send to the iPad
+      const rec = { ...cur, offloaded: { at: Date.now(), zip: name, size: f.blob.size } };
+      await db.saveItem(rec, small, null);
+      if (!small) await db.del('files', it.id);
+      remember(rec);
+      if (++n % 10 === 0) b2.set(`원본 비우는 중… ${n}/${items.length}`);
+    }
+  } catch (e) {
+    alertBox('일부만 비웠어요', `${n}개를 비웠어요. ${(e && e.message) || ''}`);
+  } finally { b2.done(); }
+  S.settings.lastMoveOut = Date.now();
+  saveSettings();
+  toast(`원본 ${n}개를 비웠어요`, 2600);
+  renderCurrent();
+}
+
 async function restoreFrom(file) {
   let z, meta;
   const b = busy('백업 파일 읽는 중…');
@@ -1817,7 +1957,7 @@ async function restoreFrom(file) {
   const withDrawings = z.has('drawings/floors.json') && !S.pkg;
   const ok = await confirmBox('백업에서 복원',
     `백업 안의 사진·영상 ${items.length}개 중 새로 넣을 것 ${fresh}개` +
-    (items.length - fresh ? `, 이미 있는 ${items.length - fresh}개는 백업 내용으로 덮어써요` : '') + '.' +
+    (items.length - fresh ? (meta.kind === 'originals' ? `, 이미 있는 ${items.length - fresh}개는 원본을 되돌려 놓아요` : `, 이미 있는 ${items.length - fresh}개는 더 나중에 고친 쪽을 남겨요`) : '') + '.' +
     (withDrawings ? '\n도면도 같이 넣어요.' : ''), '복원');
   if (!ok) return false;
   const b2 = busy('복원 중…');
@@ -1828,8 +1968,18 @@ async function restoreFrom(file) {
     // a backup made from broken copies (see repairStored) holds the whole older backup in each file
     const own = async (blob, name, type) => blob ? ((await unzipped(blob, name, type, zips).catch(() => null)) || ownCopy(blob, type)) : null;
     for (const it of items) {
-      const mn = `media/${it.id}.${extOf(it)}`, tn = `thumbs/${it.id}.jpg`;
-      await db.saveItem({ ...it, draft: false }, await own(z.get(mn), mn, it.mime || ''), await own(z.get(tn), tn, 'image/jpeg'));
+      const mn = (meta.files && meta.files[it.id]) || `media/${it.id}.${extOf(it)}`, tn = `thumbs/${it.id}.jpg`;
+      const cur = S.byId.get(it.id), mb = z.get(mn);
+      if (cur && (cur.mt || cur.ts) > (it.mt || it.ts)) {
+        // changed here since: keep this record, but take back an original that was moved out
+        if (cur.offloaded && !it.offloaded && mb) { await db.saveItem({ ...cur, offloaded: null }, await own(mb, mn, it.mime || ''), null); dropThumb(it.id); }
+        if (++n % 5 === 0) b2.set(`복원 중… ${n}/${items.length}`);
+        continue;
+      }
+      // a small copy never replaces an original this device still has
+      const keepOwn = it.offloaded && cur && !cur.offloaded;
+      await db.saveItem({ ...it, draft: false, offloaded: keepOwn ? null : it.offloaded || null },
+        keepOwn ? null : await own(mb, mn, it.mime || ''), await own(z.get(tn), tn, 'image/jpeg'));
       dropThumb(it.id);
       if (++n % 5 === 0) b2.set(`복원 중… ${n}/${items.length}`);
     }
@@ -1837,7 +1987,7 @@ async function restoreFrom(file) {
       if (meta.settings.calib != null) S.settings.calib = meta.settings.calib;
       if (meta.settings.capture) S.settings.capture = meta.settings.capture;
     }
-    S.settings.lastBackup = Math.max(S.settings.lastBackup || 0, Date.parse(meta.created) || 0);
+    if (meta.kind !== 'originals') S.settings.lastBackup = Math.max(S.settings.lastBackup || 0, Date.parse(meta.created) || 0);
     if (Array.isArray(meta.inPhotos)) { for (const id of meta.inPhotos) S.shared.add(id); db.kvSet('inPhotos', [...S.shared]).catch(() => {}); }
     if (Array.isArray(meta.todos)) await restoreTodos(meta.todos);
     saveSettings();
@@ -2156,7 +2306,10 @@ async function renderMore() {
     el('p', {}, sent ? `마지막으로 보낸 때 ${dayLabel(dayOf(sent))} ${timeOf(sent)}` : '아직 보낸 적이 없어요.'),
     btns(btn('새 것만 보내기', () => makeBackup(true)))));
   const storage = el('p', {}, '확인 중…');
-  parts.push(group('저장 공간', el('p', {}, `사진·영상 ${items.length}개`), storage));
+  const moved = items.filter((i) => i.offloaded).length;
+  parts.push(group('저장 공간', el('p', {}, `사진·영상 ${items.length}개${moved ? ` · 원본을 iCloud로 옮긴 것 ${moved}개` : ''}`), storage,
+    el('p', {}, '폰 공간이 모자라면 지난 사진의 원본을 ZIP으로 묶어 iCloud Drive에 저장하고, 폰에는 보기용 작은 사진만 남길 수 있어요. 기록·위치·이슈는 그대로예요. 원본이 다시 필요하면 그 ZIP을 "백업에서 복원"으로 넣으면 돼요(아이패드도 같아요).'),
+    btns(btn('원본 iCloud로 옮기기', moveOut))));
   parts.push(group('지우기',
     el('p', {}, '이 폰에 저장된 사진·영상·기록을 모두 지워요. 도면은 남아요.'),
     btns(btn('사진·기록 모두 지우기', wipeData, 'danger'))));
@@ -2192,6 +2345,7 @@ function showTab(t) {
   if (prev !== t && (prev === 'camera' || t === 'camera')) scanLoop();
   // TBM shots are taken in one go: leaving the camera ends TBM mode, so it does not greet you next time
   if (t !== 'camera' && S.mode === 'tbm') { S.mode = 'normal'; renderCamBanner(); }
+  if (t !== 'camera' && S.mode === 'target') endTarget();
   if (t !== 'camera' && cam.recording) finishRecording(); // leaving the camera ends the video
   if (t !== 'days' && D.selecting) { D.selecting = false; D.sel.clear(); }
   if (t === 'days' && prev === 'days') S.day = today();

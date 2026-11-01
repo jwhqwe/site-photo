@@ -203,7 +203,7 @@ function exifBlock(u8) {
     if (m === 0xe1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) {
       const t = p + 10, end = p + 2 + len, le = u8[t] === 0x49, dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
       const g16 = (o) => dv.getUint16(t + o, le), g32 = (o) => dv.getUint32(t + o, le);
-      let orient = 1, orientAt = -1, date = false, exifAt = 0;
+      let orient = 1, orientAt = -1, date = false, exifAt = 0, when = null;
       const scan = (ifd, fn) => {
         if (!ifd || t + ifd + 2 > end) return;
         const n = g16(ifd);
@@ -211,13 +211,27 @@ function exifBlock(u8) {
       };
       try {
         scan(g32(4), (tag, e) => { if (tag === 0x0112) { orient = g16(e + 8); orientAt = t + e + 8; } else if (tag === 0x8769) exifAt = g32(e + 8); });
-        scan(exifAt, (tag) => { if (tag === 0x9003) date = true; });
+        scan(exifAt, (tag, e) => {
+          if (tag !== 0x9003) return;
+          date = true;
+          const o = t + g32(e + 8), m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(String.fromCharCode(...u8.subarray(o, o + 19)));
+          if (m) when = new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime(); // the phone's own clock time
+        });
       } catch (e) { /* a broken block counts as one without a date */ }
-      return { start: p, end, orient, orientAt, le, date };
+      return { start: p, end, orient, orientAt, le, date, when };
     }
     p += 2 + len;
   }
   return null;
+}
+// when a JPEG was taken, from its Exif (null if it does not say)
+export async function shotTime(blob) {
+  try {
+    const u8 = new Uint8Array(await blob.slice(0, 131072).arrayBuffer());
+    if (u8[0] !== 0xff || u8[1] !== 0xd8) return null;
+    const ex = exifBlock(u8);
+    return ex && ex.when && Number.isFinite(ex.when) ? ex.when : null;
+  } catch (e) { return null; }
 }
 function buildExif(ts, w, h, orient = 1) {
   if (orient >= 5 && orient <= 8) [w, h] = [h, w]; // stored sideways
