@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.9.2';
+const APP_VERSION = '1.9.3';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -386,6 +386,7 @@ async function onShutter() {
   if (!sensors.asked) sensors.requestPermission();
   if (S.settings.capture === 'native' || !cam.active) { shootNative('photo'); return; }
   if (camBusy) return;
+  await sensors.ready(); // first shot of the session: know how the phone is held before taking it
   if (S.scan) {
     let c = null;
     const turn = sensors.extraTurn();
@@ -514,6 +515,7 @@ async function toggleRecord() {
   if (S.settings.capture === 'native' || !cam.active || typeof MediaRecorder !== 'function') { shootNative('video'); return; }
   if (camBusy) return;
   if (!sensors.asked) sensors.requestPermission();
+  await sensors.ready();
   try { await cam.startRecording(); }
   catch (e) { toast((e && e.message) || '녹화를 시작하지 못했어요'); return; }
   REC.turn = sensors.extraTurn();
@@ -2457,6 +2459,9 @@ function bindUI() {
   $$('#tabs button').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
   // camera
   $('#camShutter').onclick = onShutter;
+  // the first tap on the camera screen asks for the motion sensors, so they already run at the first photo
+  // (not the 기본 카메라 key: iPhone shows one system window at a time)
+  $('#scr-camera').addEventListener('click', (e) => { if (!sensors.asked && !e.target.closest('#camNative')) sensors.requestPermission(); }, { capture: true });
   $('#camNative').onclick = () => (cam.recording ? togglePause() : shootNative('any'));
   $('#camVideoBtn').onclick = () => toggleRecord();
   $('#camScan').onclick = () => { S.scan = !S.scan; renderCamScan(); scanLoop(); if (S.scan) toast('종이 전체가 보이게 찍어 주세요'); };

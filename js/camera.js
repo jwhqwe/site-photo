@@ -185,14 +185,32 @@ export const sensors = {
     const onOri = (e) => {
       if (typeof e.webkitCompassHeading === 'number') { this.heading = e.webkitCompassHeading; this.headingAcc = e.webkitCompassAccuracy; }
       else if (e.absolute && typeof e.alpha === 'number') this.heading = (360 - e.alpha) % 360;
-      if (typeof e.beta === 'number') { this.beta = e.beta; this.gamma = e.gamma; this.updateTurn(); }
+      if (typeof e.beta === 'number') {
+        this.beta = e.beta; this.gamma = e.gamma; this.updateTurn();
+        if (this.waiters.length) { for (const w of this.waiters.splice(0)) w(); }
+      }
     };
     window.addEventListener('deviceorientation', onOri);
     window.addEventListener('devicemotion', (e) => this.onMotion(e));
     window.addEventListener('deviceorientationabsolute', onOri);
   },
+  // the first reading after the sensors start (or the timeout): the first photo of a session waits for it once,
+  // so a sideways first shot is known to be sideways
+  waiters: [],
+  waited: false,
+  async ready(ms = 600) {
+    if (this.beta != null || this.waited) return;
+    this.waited = true;
+    if (this.perm) await this.perm;
+    if (this.beta != null) return;
+    await new Promise((res) => { this.waiters.push(res); setTimeout(res, ms); });
+  },
   // iOS asks once, from a tap
-  async requestPermission() {
+  requestPermission() { // asked again only after a refusal (e.g. from the 센서 켜기 key)
+    if (!this.perm || this.permResult === false) this.perm = this.askPermission().then((r) => { this.permResult = r; return r; });
+    return this.perm;
+  },
+  async askPermission() {
     this.asked = true;
     try {
       if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
