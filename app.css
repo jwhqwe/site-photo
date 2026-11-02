@@ -136,6 +136,9 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .card h3 { margin: 0 0 8px; font-size: 16px; font-weight: 800; display: flex; align-items: center; gap: 8px; }
 .tbm .row { display: flex; gap: 6px; overflow-x: auto; align-items: center; padding: 2px 2px 4px; margin: -2px -2px 0; }
 .tbm .row[hidden] { display: none; }
+.pc-bar { display: block; width: 100%; margin: 4px 0 10px; border: 0; border-radius: 12px; padding: 13px 14px; background: var(--accent); color: var(--ink); font-size: 16px; font-weight: 800; text-align: left; box-shadow: var(--key-1); }
+.pc-bar::after { content: "→"; float: right; }
+.pc-bar[hidden] { display: none; }
 .series-row { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--soft); padding: 6px 0; }
 .series-txt { flex: 1; min-width: 0; border: 0; background: none; text-align: left; padding: 4px 0; display: flex; flex-direction: column; gap: 2px; }
 .series-txt b { font-size: 15px; overflow-wrap: anywhere; }

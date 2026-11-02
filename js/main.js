@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.10.2';
+const APP_VERSION = '1.11.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -40,7 +40,7 @@ const PDF_ID = '__pdf';
 // ================================================================ state
 const S = {
   pkg: null, floors: [], floorCache: new Map(),
-  items: [], byId: new Map(), names: null,
+  items: [], byId: new Map(), names: null, pc: new Set(),
   settings: { capture: 'app', calib: 0, lastBackup: 0, capFloor: null, showRooms: false, lensId: null, zoom: 1, tbmName: '건축' },
   tab: null, day: today(), planFloor: null, planSel: null, issueFilter: 'open',
   mode: 'normal', fixOf: null, tbmCount: 0, scan: false,
@@ -852,6 +852,76 @@ function shareFiles(list) {
     return Promise.resolve('failed');
   }
 }
+// ---------------------------------------------------------------- to the office PC
+// One tap from the day page: the photos not yet sent to the PC, prepared like a share (memo and place written on,
+// shooting time inside, names), then the share sheet — LocalSend (same Wi-Fi, nothing leaves the site) or the
+// company messenger. ZIP keeps Korean names whole on Windows and stops messengers from shrinking the photos.
+const unsentPC = (day) => vis().filter((i) => !i.draft && !S.pc.has(i.id) && (!day || i.day === day)).sort((a, b) => a.ts - b.ts);
+function renderPCBar(day) {
+  const n = unsentPC(day).length, btn = $('#dPC');
+  btn.hidden = !n;
+  btn.textContent = `PC로 보내기 · 안 보낸 ${n}${n ? '장' : ''}`;
+}
+async function markPC(ids) {
+  for (const id of ids) { S.pc.add(id); S.shared.add(id); }
+  await db.kvSet('toPC', [...S.pc]).catch(() => {});
+  await db.kvSet('inPhotos', [...S.shared]).catch(() => {});
+  renderCurrent();
+}
+function sendToPC(day) {
+  const lists = { day: unsentPC(day), all: unsentPC(null) };
+  let range = 'day', fmt = S.settings.pcFormat === 'zip' ? 'zip' : 'files', ready = null, run = 0;
+  return openDialog((box, close) => {
+    const info = el('p', { class: 'pre' }, '');
+    const go = el('button', { class: 'btn primary', disabled: true }, '보내기');
+    const seg = (opts, get, set) => {
+      const bs = opts.map(([l, v]) => el('button', { 'aria-pressed': String(get() === v), onclick: () => { if (get() === v) return; set(v); bs.forEach((b, i) => b.setAttribute('aria-pressed', String(opts[i][1] === v))); prep(); } }, l));
+      return el('div', { class: 'seg' }, ...bs);
+    };
+    const prep = async () => {
+      const my = ++run, list = lists[range];
+      go.disabled = true;
+      ready = null;
+      if (!list.length) { info.textContent = '보낼 사진이 없어요.'; return; }
+      const names = uniqueNames(list), multi = new Set(list.map((i) => i.day)).size > 1, out = [];
+      for (const it of list) {
+        const f = await db.get('files', it.id).catch(() => null);
+        if (my !== run) return;
+        if (f && f.blob) out.push({ id: it.id, blob: await shareBlob(it, f.blob), name: names.get(it.id), mime: it.mime, ts: it.ts, day: it.day });
+        info.textContent = `준비하는 중… ${out.length}/${list.length}`;
+      }
+      if (my !== run) return;
+      let files = out;
+      if (fmt === 'zip') {
+        const rows = [CSV_HEAD], fileOf = (id) => names.get(id) || '';
+        for (const x of out) rows.push(csvRow(S.byId.get(x.id), x.name, fileOf));
+        const zip = await makeZip([...out.map((x) => ({ name: (multi ? yymmdd(x.day) + '/' : '') + x.name, blob: x.blob, date: new Date(x.ts) })), { name: '사진목록.csv', text: csv(rows) }]);
+        if (my !== run) return;
+        files = [{ blob: zip, name: `PC_${yymmdd(today())}_${timeOf(Date.now()).replace(':', '')}.zip`, mime: 'application/zip', ts: Date.now() }];
+      }
+      ready = { files, ids: out.map((x) => x.id) };
+      const size = files.reduce((t, x) => t + x.blob.size, 0);
+      info.textContent = `${out.length}장 · ${fmtBytes(size)} 준비됐어요.\n"보내기" → LocalSend(회사 PC)나 회사 메신저를 고르세요.`;
+      go.disabled = false;
+    };
+    go.onclick = () => {
+      if (!ready) return;
+      const r0 = ready;
+      shareFiles(r0.files).then(async (r) => {
+        if (r === 'unsupported' && r0.files.length === 1) r = await shareOrDownload(r0.files[0].blob, r0.files[0].name, r0.files[0].ts);
+        if (r === 'shared' || r === 'downloaded') { await markPC(r0.ids); toast(`PC로 ${r0.ids.length}장 보냈어요`); close(); }
+        else if (r === 'unsupported') toast('여기서는 여러 장 공유가 안 돼요. ZIP 하나로 보내 주세요', 3000);
+      });
+    };
+    box.append(el('h3', {}, 'PC로 보내기'),
+      seg([[`이날 ${lists.day.length}장`, 'day'], [`안 보낸 것 전부 ${lists.all.length}장`, 'all']], () => range, (v) => { range = v; }),
+      seg([['사진 그대로', 'files'], ['ZIP 하나로', 'zip']], () => fmt, (v) => { fmt = v; S.settings.pcFormat = v; saveSettings(); }),
+      info,
+      el('p', { class: 'muted' }, 'PC에서 한글 이름이 깨지거나 메신저가 화질을 줄이면 "ZIP 하나로"로 보내세요. 압축을 풀면 이름이 그대로예요. LocalSend는 PC에서 "빠른 저장"을 켜 두면 수락 없이 바로 저장돼요.'),
+      el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => { run++; close(); } }, '닫기'), go));
+    prep();
+  }, { dismiss: false });
+}
 async function markShared(ids) {
   for (const id of ids) S.shared.add(id);
   await db.kvSet('inPhotos', [...S.shared]).catch(() => {});
@@ -1244,7 +1314,7 @@ function renderViewerInfo(it) {
   if (it.pitch != null) add('기울기', pitchText(it.pitch));
   if (it.issue) add('이슈', el('b', { class: it.issue.status === 'open' ? 'st-open' : 'st-done' }, issueText(it)));
   if (it.memo) add('메모', it.memo);
-  add('파일', el('code', {}, nameOf(it)), ' ', [it.w && it.h ? `${it.w}×${it.h}` : '', it.size ? fmtBytes(it.size) : '', LENS[it.lens] || '', S.shared.has(it.id) ? '보냄' : ''].filter(Boolean).join(' · '));
+  add('파일', el('code', {}, nameOf(it)), ' ', [it.w && it.h ? `${it.w}×${it.h}` : '', it.size ? fmtBytes(it.size) : '', LENS[it.lens] || '', S.pc && S.pc.has(it.id) ? 'PC로 보냄' : S.shared.has(it.id) ? '보냄' : ''].filter(Boolean).join(' · '));
   $('#vInfo').replaceChildren(...rows);
 }
 function renderViewerActions(it) {
@@ -1552,7 +1622,8 @@ function cellFor(it, { tag = 'button', onClick = null, label = null, selectable 
   if (it.issue) b.append(el('span', { class: 'badge ' + (it.issue.status === 'open' ? 'open' : 'done') }, it.issue.status === 'open' ? '이슈' : '조치됨'));
   if (it.fixOf) b.append(el('span', { class: 'badge done' }, '조치 후'));
   if (it.memo) b.append(el('span', { class: 'badge' }, '메모'));
-  if (S.shared.has(it.id)) b.append(el('span', { class: 'badge sent' }, '보냄'));
+  if (S.pc && S.pc.has(it.id)) b.append(el('span', { class: 'badge sent' }, 'PC'));
+  else if (S.shared.has(it.id)) b.append(el('span', { class: 'badge sent' }, '보냄'));
   c.append(b);
   if (tag === 'button') {
     c.onclick = () => {
@@ -1614,6 +1685,7 @@ function renderDays() {
   }, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요'), chev)), row);
 
   renderSeriesCard(day);
+  renderPCBar(day);
   $('#dGrid').replaceChildren(...rest.map((it) => cellFor(it, { selectable: true })));
   $('#dEmpty').hidden = rest.length > 0;
   $('#dCount').textContent = rest.length ? `사진 ${rest.length}장` : '사진';
@@ -2044,7 +2116,7 @@ async function makeBackup(send = false) {
     const entries = [];
     const meta = {
       format: 'fieldphoto-backup', version: 1, app: APP_VERSION, created: new Date().toISOString(),
-      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(),
+      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], toPC: [...(S.pc || [])], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(),
     };
     entries.push({ name: 'backup.json', text: JSON.stringify(meta) });
     markZip(meta);
@@ -2253,6 +2325,7 @@ async function restoreFrom(file, { many = false } = {}) {
     }
     if (meta.kind !== 'originals') S.settings.lastBackup = Math.max(S.settings.lastBackup || 0, Date.parse(meta.created) || 0);
     if (Array.isArray(meta.inPhotos)) { for (const id of meta.inPhotos) S.shared.add(id); db.kvSet('inPhotos', [...S.shared]).catch(() => {}); }
+    if (Array.isArray(meta.toPC)) { for (const id of meta.toPC) S.pc.add(id); db.kvSet('toPC', [...S.pc]).catch(() => {}); }
     if (Array.isArray(meta.todos)) await restoreTodos(meta.todos);
     saveSettings();
     setItems(await db.all('items'));
@@ -2502,6 +2575,8 @@ async function wipeData() {
     S.lastSetup = null;
     S.shared = new Set();
     await db.kvSet('inPhotos', []);
+    S.pc = new Set();
+    await db.kvSet('toPC', []);
     setItems([]);
   } finally { b.done(); }
   toast('모두 지웠어요');
@@ -2715,6 +2790,7 @@ function bindUI() {
     renderDays();
   };
   $('#dSelReport').onclick = () => makeReport([...D.sel].map((id) => S.byId.get(id)));
+  $('#dPC').onclick = () => sendToPC(S.day);
   $('#dSelNum').onclick = () => { const sel = [...D.sel].map((id) => S.byId.get(id)).filter(Boolean); if (sel.length) numberSelected(sel); };
   $('#dSelExport').onclick = () => exportItems([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
   $('#dSelShare').onclick = () => shareBatch([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
@@ -2828,6 +2904,7 @@ async function boot() {
   S.lastSetup = await db.kvGet('lastSetup', null);
   await loadTodos().catch(() => {});
   S.shared = new Set((await db.kvGet('inPhotos', [])) || []);
+  S.pc = new Set((await db.kvGet('toPC', [])) || []);
   setItems(await db.all('items'));
   // a photo whose location step was interrupted is kept as a "위치 없음" photo
   const drafts = S.items.filter((i) => i.draft);
