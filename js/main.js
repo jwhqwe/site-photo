@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.9.2';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -294,14 +294,14 @@ async function startCamera() {
   if (camBusy) return;
   camBusy = true;
   try {
-    try { await cam.start(S.settings.lensId || undefined); }
+    // always 1× on the main camera when the camera starts
+    try { await cam.start(S.settings.wideId || undefined); }
     catch (e) {
-      if (!S.settings.lensId || (e && e.name === 'NotAllowedError')) throw e;
-      S.settings.lensId = null;
+      if (!S.settings.wideId || (e && e.name === 'NotAllowedError')) throw e;
+      S.settings.wideId = null;
       saveSettings();
       await cam.start();
     }
-    if (S.settings.zoom && S.settings.zoom !== 1) await cam.setZoom(S.settings.zoom).catch(() => {});
     if (S.tab !== 'camera') scheduleCamStop();
     hideCamStart();
     renderLenses();
@@ -316,6 +316,7 @@ async function renderLenses() {
   const box = $('#camLens');
   const L = await cam.lenses();
   const uw = L.find((l) => l.zoom === '0.5x'), wide = L.find((l) => l.zoom === '1x');
+  if (wide && S.settings.wideId !== wide.id) { S.settings.wideId = wide.id; saveSettings(); }
   cam.lens = (uw && cam.deviceId === uw.id) || cam.zoom < 1 ? '0.5x' : cam.zoom >= 2 ? '2x' : '1x';
   // 0.5× is the ultra wide camera; 1× and 2× are the main camera. Without a separate ultra wide camera,
   // a camera whose own zoom goes below 1 gives 0.5× by zooming out.
@@ -333,9 +334,6 @@ async function pickLens(o) {
   try {
     if (o.id ? cam.deviceId !== o.id : cam.lens === '0.5x' && cam.zoom >= 1) await cam.start(o.id || undefined);
     await cam.setZoom(o.z);
-    S.settings.lensId = o.id || null;
-    S.settings.zoom = o.z;
-    saveSettings();
   } catch (e) {
     toast('이 렌즈는 켤 수 없어요');
     try { await cam.start(); } catch (e2) { /* shown on next start */ }
@@ -363,7 +361,7 @@ function renderCamLast() {
   const btn = $('#camLast');
   if (!last) { btn.style.backgroundImage = ''; btn.onclick = null; return; }
   thumbUrl(last.id).then((u) => { btn.style.backgroundImage = u ? `url("${u}")` : ''; });
-  btn.onclick = () => openViewer(last.id);
+  btn.onclick = () => openViewer(last.id, { all: true });
 }
 function renderCamBanner() {
   const b = $('#camBanner');
@@ -384,6 +382,7 @@ function renderCamBanner() {
 }
 
 async function onShutter() {
+  if (cam.recording) { recPhoto(); return; }
   if (!sensors.asked) sensors.requestPermission();
   if (S.settings.capture === 'native' || !cam.active) { shootNative('photo'); return; }
   if (camBusy) return;
@@ -473,13 +472,42 @@ async function onCaptured(media) {
 }
 
 // video: recorded in the app (sharp); the phone camera only when the app camera is off or cannot record
-const REC = { timer: 0, turn: 0, lens: '1x' };
+const REC = { timer: 0, turn: 0, lens: '1x', photos: [] };
 const mmss = (ms) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 function renderRec() {
-  const on = cam.recording, b = $('#camVideoBtn');
-  b.textContent = on ? `■ 멈추기 ${mmss(Date.now() - cam.recAt)}` : '영상';
+  const on = cam.recording, b = $('#camVideoBtn'), n = $('#camNative');
+  b.textContent = on ? `■ 끝내기 ${mmss(cam.recMs)}` : '영상';
   b.classList.toggle('rec', on);
-  $('#camShutter').disabled = on;
+  // while recording: the shutter takes a photo from the video, the left key pauses and goes on
+  n.textContent = on ? (cam.paused ? '● 이어 찍기' : 'Ⅱ 일시정지') : '기본 카메라';
+  n.hidden = on && !cam.canPause;
+  n.classList.toggle('paused', on && cam.paused);
+}
+function togglePause() {
+  if (!cam.recording) return;
+  if (cam.paused) cam.resumeRecording(); else cam.pauseRecording();
+  renderRec();
+}
+// a photo while recording: a frame of the video (1080p), saved at once; it gets the video's location afterwards
+async function recPhoto() {
+  if (camBusy) return;
+  camBusy = true;
+  try {
+    const c = cam.captureCanvas(sensors.extraTurn());
+    const w = c.width, h = c.height, raw = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.92));
+    c.width = c.height = 1;
+    if (!raw) throw new Error('찍지 못했어요');
+    const ts = Date.now(), snap = sensors.snapshot(), t = await imageThumb(raw);
+    const blob = await outBlob({ kind: 'photo', ts, w, h }, raw);
+    const extra = S.mode === 'tbm' ? { tbm: true, floor: null } : S.mode === 'target' && S.target ? targetFields(S.target) : {};
+    const it = newRecord({ blob, kind: 'photo', mime: 'image/jpeg', lens: cam.lens, w, h }, ts, { ...extra, heading: snap.heading, pitch: snap.pitch });
+    await putItem(it, blob, t.thumb);
+    if (!extra.tbm && !extra.pin) REC.photos.push(it.id);
+    try { cam.video.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 160 }); } catch (e) { /* no animation */ }
+    renderCamLast();
+    toast('영상 찍는 중 사진 저장');
+  } catch (e) { toast((e && e.message) || '찍지 못했어요'); }
+  finally { camBusy = false; }
 }
 async function toggleRecord() {
   if (cam.recording) { await finishRecording(); return; }
@@ -490,6 +518,7 @@ async function toggleRecord() {
   catch (e) { toast((e && e.message) || '녹화를 시작하지 못했어요'); return; }
   REC.turn = sensors.extraTurn();
   REC.lens = cam.lens;
+  REC.photos = [];
   renderRec();
   REC.timer = setInterval(renderRec, 500);
 }
@@ -503,7 +532,7 @@ async function finishRecording() {
     if (blob) t = await videoThumb(blob);
   } catch (e) { /* told below */ } finally { b.done(); renderRec(); }
   if (!blob) { toast('영상을 저장하지 못했어요'); return; }
-  await onCaptured({ blob, thumb: t.thumb, w: t.w, h: t.h, mime: blob.type || 'video/mp4', kind: 'video', lens: REC.lens });
+  await onCaptured({ blob, thumb: t.thumb, w: t.w, h: t.h, mime: blob.type || 'video/mp4', kind: 'video', lens: REC.lens, withPhotos: REC.photos.splice(0) });
 }
 
 // 사진대지: chosen photos on A4 pages with 일시·위치·부재·내용, as a PDF
@@ -934,6 +963,10 @@ async function finishSheet(later) {
       S.mode = 'normal';
       S.fixOf = null;
     }
+    if (C.media && C.media.withPhotos && C.media.withPhotos.length && rec.pin) {
+      const loc = { floor: rec.floor, pin: rec.pin.slice(), members: (rec.members || []).map((m) => ({ ...m })), room: rec.room, grid: rec.grid, noMember: rec.noMember, fan: rec.fan };
+      for (const id of C.media.withPhotos) { const p = S.byId.get(id); if (p && !p.pin) await putItem({ ...p, ...loc }); }
+    }
     if (mode === 'new' && rec.pin) {
       S.lastSetup = { ...setupOf(rec), steps: sensors.motionSeen ? sensors.steps : null, session: sensors.session };
       db.kvSet('lastSetup', S.lastSetup).catch(() => {});
@@ -968,9 +1001,10 @@ async function discardSheet() {
 // ================================================================ viewer
 const V = { item: null, url: '', blob: null, out: null };
 
-async function openViewer(id) {
+async function openViewer(id, { all = false } = {}) {
   const it = S.byId.get(id);
   if (!it) return;
+  if ($('#viewer').hidden) V.all = all; // stepping keeps the range it was opened with
   V.item = it;
   $('#viewer').hidden = false;
   $('#viewer .v-scroll').scrollTop = 0;
@@ -1002,6 +1036,11 @@ async function renderViewer(full) {
     } else media.append(el('p', { class: 'empty' }, it.offloaded ? `원본은 iCloud Drive의 ${it.offloaded.zip}에 있어요` : '파일을 찾지 못했어요'));
     const list = dayList(it), k = list.findIndex((i) => i.id === it.id);
     if (list.length > 1) media.append(el('span', { class: 'v-pos' }, `${k + 1} / ${list.length}`));
+    // a video takes the swipe for its own controls: arrows at the sides instead
+    if (it.kind === 'video' && list.length > 1) {
+      if (k > 0) media.append(el('button', { class: 'v-step prev', 'aria-label': '이전 사진', onclick: () => viewerStep(-1) }, '‹'));
+      if (k < list.length - 1) media.append(el('button', { class: 'v-step next', 'aria-label': '다음 사진', onclick: () => viewerStep(1) }, '›'));
+    }
   }
   renderViewerInfo(it);
   renderViewerActions(it);
@@ -1073,7 +1112,8 @@ function viewerCtx(it) {
 }
 // ---------------------------------------------------------------- viewer: slide to the next photo of the day, pinch or double-tap to zoom
 const VZ = { s: 1, x: 0, y: 0, pts: new Map(), one: null, two: null, lastTap: 0 };
-const dayList = (it) => vis().filter((i) => i.day === it.day && !i.draft).sort((a, b) => a.ts - b.ts);
+// the photos the viewer steps through: that day's, or all of them when opened from the camera's last photo
+const dayList = (it) => vis().filter((i) => (V.all || i.day === it.day) && !i.draft).sort((a, b) => a.ts - b.ts);
 function viewerStep(dir) {
   if (!V.item) return false;
   const list = dayList(V.item), k = list.findIndex((i) => i.id === V.item.id), t = list[k + dir];
@@ -1090,8 +1130,11 @@ function applyZoom() {
   VZ.x = Math.min(0, Math.max(W - W * VZ.s, VZ.x)); // the picture keeps covering its box
   VZ.y = Math.min(0, Math.max(H - H * VZ.s, VZ.y));
   if (VZ.s === 1) VZ.x = VZ.y = 0;
+  // zoom by making the picture bigger, not by scaling a layer: Safari then draws it from the full-size photo
   img.style.transformOrigin = '0 0';
-  img.style.transform = VZ.s === 1 ? '' : `translate(${VZ.x}px, ${VZ.y}px) scale(${VZ.s})`;
+  img.style.width = VZ.s === 1 ? '' : `${W * VZ.s}px`;
+  img.style.height = VZ.s === 1 ? '' : `${H * VZ.s}px`;
+  img.style.transform = VZ.s === 1 ? '' : `translate(${VZ.x}px, ${VZ.y}px)`;
   wrap.classList.toggle('zoomed', VZ.s > 1);
 }
 function bindViewerGestures() {
@@ -1127,6 +1170,14 @@ function bindViewerGestures() {
     if (VZ.s > 1) { VZ.x = o.tx + dx; VZ.y = o.ty + dy; applyZoom(); return; }
     if (Math.abs(dx) > Math.abs(dy)) img.style.transform = `translateX(${dx}px)`; // the picture follows the finger
   });
+  // iPhone hands a touch to scrolling with pointercancel: forget it, or the next swipe counts as a two-finger pinch
+  host.addEventListener('pointercancel', (e) => {
+    VZ.pts.delete(e.pointerId);
+    if (VZ.pts.size < 2) VZ.two = null;
+    VZ.one = null;
+    const img = zoomImg();
+    if (img && VZ.s === 1) img.style.transform = '';
+  });
   host.addEventListener('pointerup', (e) => {
     if (!VZ.pts.has(e.pointerId)) return;
     VZ.pts.delete(e.pointerId);
@@ -1138,7 +1189,7 @@ function bindViewerGestures() {
     if (VZ.s === 1) {
       img.style.transform = '';
       if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.3) {
-        if (!viewerStep(dx < 0 ? 1 : -1)) toast(dx < 0 ? '이날 마지막 사진이에요' : '이날 첫 사진이에요');
+        if (!viewerStep(dx < 0 ? 1 : -1)) toast(V.all ? (dx < 0 ? '마지막 사진이에요' : '첫 사진이에요') : dx < 0 ? '이날 마지막 사진이에요' : '이날 첫 사진이에요');
         return;
       }
     }
@@ -2406,7 +2457,7 @@ function bindUI() {
   $$('#tabs button').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
   // camera
   $('#camShutter').onclick = onShutter;
-  $('#camNative').onclick = () => shootNative('photo');
+  $('#camNative').onclick = () => (cam.recording ? togglePause() : shootNative('any'));
   $('#camVideoBtn').onclick = () => toggleRecord();
   $('#camScan').onclick = () => { S.scan = !S.scan; renderCamScan(); scanLoop(); if (S.scan) toast('종이 전체가 보이게 찍어 주세요'); };
   $('#camFloor').onclick = async () => {

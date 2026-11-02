@@ -79,8 +79,16 @@ export class Camera {
     this.rec.ondataavailable = (e) => { if (e.data && e.data.size) this.chunks.push(e.data); };
     this.mic = mic;
     this.recAt = Date.now();
+    this.pausedMs = 0;
+    this.pausedAt = 0;
     this.rec.start(1000);
   }
+  // stop for a moment and go on in the same video, like the phone camera
+  get canPause() { return !!(this.rec && typeof this.rec.pause === 'function'); }
+  get paused() { return !!(this.rec && this.rec.state === 'paused'); }
+  pauseRecording() { if (this.rec && this.rec.state === 'recording') { this.rec.pause(); this.pausedAt = Date.now(); } }
+  resumeRecording() { if (this.rec && this.rec.state === 'paused') { this.rec.resume(); this.pausedMs += Date.now() - this.pausedAt; this.pausedAt = 0; } }
+  get recMs() { return this.rec ? Date.now() - this.recAt - this.pausedMs - (this.pausedAt ? Date.now() - this.pausedAt : 0) : 0; }
   stopRecording() {
     return new Promise((resolve) => {
       const rec = this.rec;
@@ -155,7 +163,7 @@ export function nativeCapture(kind) {
   return new Promise((resolve) => {
     const inp = document.createElement('input');
     inp.type = 'file';
-    inp.accept = kind === 'video' ? 'video/*' : 'image/*';
+    inp.accept = kind === 'video' ? 'video/*' : kind === 'any' ? 'image/*,video/*' : 'image/*'; // both: the camera opens with 사진 · 비디오
     inp.setAttribute('capture', 'environment');
     inp.style.display = 'none';
     let settled = false;
