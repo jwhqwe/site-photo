@@ -62,7 +62,7 @@ export function renderTodos() {
       el('span', {}, t.text),
       t.memo ? el('small', {}, t.memo) : null,
       t.state === 'moved' ? el('small', { class: 'todo-note' }, `${short(t.movedTo)}로 넘김`) : t.from ? el('small', { class: 'todo-note' }, `${short(t.from)}에서 넘어옴`) : null,
-      t.againOf ? el('small', { class: 'todo-note' }, '어제에 이어서') : null),
+      null),
     t.state === 'done' ? againKey(t) : null)));
   $('#tEmpty').hidden = items.length > 0;
 }

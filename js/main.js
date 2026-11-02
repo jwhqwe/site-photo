@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.10.1';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -225,6 +225,8 @@ const pitchText = (p) => (p == null ? '' : `${p > 0 ? '+' : ''}${p}°${p <= -20 
 function placeText(it) {
   if (it.tbm) return 'TBM';
   if (it.doc) return '문서';
+  const sr = seriesOf(it);
+  if (sr) return sr.base; // a numbered photo: what was written before _01 is its place
   if (!it.pin) return '위치 없음';
   return it.room ? it.room.name : floorLabel(it.floor);
 }
@@ -328,8 +330,8 @@ async function numberSelected(sel) {
 }
 // what goes on a shared photo: where it was taken (층 · 실 · 그리드 · 부재), then the memo
 function photoText(it) {
-  const where = it.tbm || it.doc || !it.pin || S.settings.placeOn === false ? ''
-    : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid, it.noMember ? '' : memberText(it)].filter(Boolean).join(' · ');
+  const where = it.tbm || it.doc || !it.pin || seriesOf(it) || S.settings.placeOn === false ? '' // a numbered memo says where itself
+    : [floorLabel(it.floor), it.room ? it.room.name : '', it.noMember ? '' : memberText(it)].filter(Boolean).join(' · ');
   return [where, it.memo || ''].filter(Boolean).join('\n');
 }
 function memberText(it) {
@@ -704,7 +706,7 @@ async function finishRecording() {
 // 사진대지: chosen photos on A4 pages with 일시·위치·부재·내용, as a PDF
 function reportRows(it) {
   const d = new Date(it.ts), p2 = (n) => String(n).padStart(2, '0');
-  const where = it.tbm ? 'TBM' : it.doc ? '문서' : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid].filter(Boolean).join(' · ') || '위치 없음';
+  const where = it.tbm ? 'TBM' : it.doc ? '문서' : seriesOf(it) ? seriesOf(it).base : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid].filter(Boolean).join(' · ') || '위치 없음';
   const what = it.tbm || it.doc ? '' : it.noMember ? '부재 없음' : memberText(it);
   const note = [it.issue ? issueText(it) : '', it.fixOf ? '조치 후' : '', it.memo || ''].filter(Boolean).join(' · ');
   return [['일시', `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())} ${timeOf(it.ts)}`], ['위치', where], ['부재', what || '-'], ['내용', note || '-']];
@@ -1546,7 +1548,7 @@ function cellFor(it, { tag = 'button', onClick = null, label = null, selectable 
   const b = el('span', { class: 'b' });
   if (it.kind === 'video') b.append(el('span', { class: 'badge video' }, '영상'));
   if (it.doc) b.append(el('span', { class: 'badge doc' }, '문서'));
-  if (!it.tbm && !it.doc && !it.pin) b.append(el('span', { class: 'badge nopin' }, '위치 없음'));
+  if (!it.tbm && !it.doc && !it.pin && !seriesOf(it)) b.append(el('span', { class: 'badge nopin' }, '위치 없음'));
   if (it.issue) b.append(el('span', { class: 'badge ' + (it.issue.status === 'open' ? 'open' : 'done') }, it.issue.status === 'open' ? '이슈' : '조치됨'));
   if (it.fixOf) b.append(el('span', { class: 'badge done' }, '조치 후'));
   if (it.memo) b.append(el('span', { class: 'badge' }, '메모'));
@@ -2550,7 +2552,7 @@ async function renderMore() {
     }))));
   const placeOn = S.settings.placeOn !== false;
   parts.push(group('사진에 쓰는 글',
-    el('p', {}, '공유하는 사진에 메모와 함께 위치(층 · 실 · 그리드 · 부재)를 써요. 사진 보기에서 글을 끌어 옮기거나 사진마다 숨길 수 있어요.'),
+    el('p', {}, '공유하는 사진에 메모와 함께 위치(층 · 실 · 부재)를 써요. 번호 사진(…_01)은 번호 메모만 써요. 사진 보기에서 글을 끌어 옮기거나 사진마다 숨길 수 있어요.'),
     el('div', { class: 'seg' }, ...[[true, '위치도 쓰기'], [false, '메모만']].map(([v, l]) => el('button', {
       'aria-pressed': String(placeOn === v), onclick: () => { S.settings.placeOn = v; saveSettings(); renderMore(); },
     }, l)))));

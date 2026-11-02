@@ -66,8 +66,17 @@ export function computeNames(items, tbmLabel = '건축') {
   const base = new Map();
   const groups = new Map();
   const tbmDef = fileSafe(tbmLabel || '') || 'TBM';
+  const used = new Set();
   for (const it of [...items].sort((a, b) => a.ts - b.ts)) {
     if (it.fixOf) continue;
+    const line = String(it.memo || '').split('\n')[0].trim();
+    if (!it.tbm && /^.*\S\s*_\d{1,3}$/.test(line)) { // a numbered photo: the user's own name is its name
+      let nm = line.replace(/[\\/:*?"<>|#]/g, '').trim();
+      if (used.has(nm)) nm = `${yymmdd(it.day)} ${nm}`;
+      used.add(nm);
+      base.set(it.id, nm);
+      continue;
+    }
     const tbm = it.tbm ? fileSafe(it.tbmLabel || '') || tbmDef : '';
     const place = it.tbm ? 'TBM|' + tbm : it.doc ? '문서' : (it.room ? fileSafe(it.room.name) : '위치없음');
     const k = it.day + '|' + place;
