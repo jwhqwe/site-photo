@@ -131,6 +131,8 @@ export function warp(src, q, maxSide = 2600) {
   const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = q;
   const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
   let W = Math.max(dist(x0, y0, x1, y1), dist(x3, y3, x2, y2)), H = Math.max(dist(x0, y0, x3, y3), dist(x1, y1, x2, y2));
+  const r = pageAspect(q, src.width, src.height);
+  if (r) { const long = Math.max(W, H); if (r >= 1) { W = long; H = long / r; } else { H = long; W = long * r; } }
   const k = Math.min(1, maxSide / Math.max(W, H));
   W = Math.max(8, Math.round(W * k)); H = Math.max(8, Math.round(H * k));
   const sx = x0 - x1 + x2 - x3, sy = y0 - y1 + y2 - y3;
@@ -160,37 +162,81 @@ export function warp(src, q, maxSide = 2600) {
   return c;
 }
 
-// a clean page: the paper's own brightness is measured in blocks and divided out (shadows go), then contrast
-export function enhance(c) {
-  const W = c.width, H = c.height, x = c.getContext('2d'), im = x.getImageData(0, 0, W, H), d = im.data;
-  const S = 40, bw = Math.ceil(W / S), bh = Math.ceil(H / S), bg = new Float32Array(bw * bh);
-  for (let y = 0; y < H; y++) {
-    const row = ((y / S) | 0) * bw;
-    for (let i = 0, o = y * W * 4; i < W; i++, o += 4) {
-      const l = (d[o] * 3 + d[o + 1] * 6 + d[o + 2]) / 10, k = row + ((i / S) | 0);
-      if (l > bg[k]) bg[k] = l;
-    }
+// a scanned look: the paper's own brightness is found (bright envelope over blocks, spread wide enough to step over
+// text and table lines, then smoothed) and divided out, so shadows and uneven light go; strokes are sharpened; then
+// levels: the paper becomes pure white, ink near black (curve keeps thin strokes dark). 'color' keeps stamps and
+// marks in colour on white paper, 'gray' gives a black-and-white scan.
+export function enhance(c, mode = 'color') {
+  if (mode === 'none') return c;
+  const W = c.width, H = c.height, x = c.getContext('2d'), im = x.getImageData(0, 0, W, H), d = im.data, N = W * H;
+  const L = new Float32Array(N);
+  for (let i = 0, o = 0; i < N; i++, o += 4) L[i] = (d[o] * 3 + d[o + 1] * 6 + d[o + 2]) / 10;
+  const B = Math.max(8, Math.round(Math.max(W, H) / 90)), bw = Math.ceil(W / B), bh = Math.ceil(H / B);
+  let g = new Float32Array(bw * bh);
+  for (let y = 0; y + 1 < H; y += 2) for (let i = 0; i + 1 < W; i += 2) { // brightest 2×2 average in each block
+    const p = y * W + i, v = (L[p] + L[p + 1] + L[p + W] + L[p + W + 1]) / 4, k = ((y / B) | 0) * bw + ((i / B) | 0);
+    if (v > g[k]) g[k] = v;
   }
-  const sm = new Float32Array(bw * bh); // 3×3 mean, so the page has no block seams
-  for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
-    let s = 0, n = 0;
-    for (let yy = Math.max(0, by - 1); yy <= Math.min(bh - 1, by + 1); yy++) for (let xx = Math.max(0, bx - 1); xx <= Math.min(bw - 1, bx + 1); xx++) { s += bg[yy * bw + xx]; n++; }
-    sm[by * bw + bx] = s / n;
-  }
-  const at = (bx, by) => sm[Math.max(0, Math.min(bh - 1, by)) * bw + Math.max(0, Math.min(bw - 1, bx))];
-  for (let y = 0, o = 0; y < H; y++) {
-    const gy = y / S - 0.5, y0 = Math.floor(gy), fy = gy - y0;
-    for (let i = 0; i < W; i++, o += 4) {
-      const gx = i / S - 0.5, x0 = Math.floor(gx), fx = gx - x0;
-      const b = (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
-      const gain = 255 / Math.max(70, b);
-      for (let ch = 0; ch < 3; ch++) d[o + ch] = (d[o + ch] * gain - 40) * 1.22;
+  const pass = (src, r, fn) => {
+    const out = new Float32Array(bw * bh);
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+      let a = fn === 'max' ? 0 : 0, n = 0;
+      for (let yy = Math.max(0, by - r); yy <= Math.min(bh - 1, by + r); yy++) for (let xx = Math.max(0, bx - r); xx <= Math.min(bw - 1, bx + r); xx++) {
+        const v = src[yy * bw + xx];
+        if (fn === 'max') { if (v > a) a = v; } else { a += v; n++; }
+      }
+      out[by * bw + bx] = fn === 'max' ? a : a / n;
     }
+    return out;
+  };
+  g = pass(pass(pass(g, 2, 'max'), 1, 'mean'), 1, 'mean');
+  const bg = (i, y) => {
+    const gx = i / B - 0.5, gy = y / B - 0.5, x0 = Math.max(0, Math.min(bw - 1, Math.floor(gx))), y0 = Math.max(0, Math.min(bh - 1, Math.floor(gy)));
+    const x1 = Math.min(bw - 1, x0 + 1), y1 = Math.min(bh - 1, y0 + 1), fx = Math.max(0, Math.min(1, gx - x0)), fy = Math.max(0, Math.min(1, gy - y0));
+    return Math.max(40, (g[y0 * bw + x0] * (1 - fx) + g[y0 * bw + x1] * fx) * (1 - fy) + (g[y1 * bw + x0] * (1 - fx) + g[y1 * bw + x1] * fx) * fy);
+  };
+  const G = new Float32Array(N); // background per pixel
+  for (let y = 0, p = 0; y < H; y++) for (let i = 0; i < W; i++, p++) { G[p] = bg(i, y); L[p] /= G[p]; }
+  // sharpen: n + 0.8 (n − 3×3 mean)
+  const S = new Float32Array(N);
+  for (let y = 0, p = 0; y < H; y++) for (let i = 0; i < W; i++, p++) {
+    if (y === 0 || i === 0 || y === H - 1 || i === W - 1) { S[p] = 0; continue; }
+    const m = (L[p - W - 1] + L[p - W] + L[p - W + 1] + L[p - 1] + L[p] + L[p + 1] + L[p + W - 1] + L[p + W] + L[p + W + 1]) / 9;
+    S[p] = 0.8 * (L[p] - m);
+  }
+  // levels from the page itself: paper = the middle of the histogram, ink = its darkest half percent
+  const hist = new Uint32Array(256);
+  for (let p = 0; p < N; p += 3) hist[Math.max(0, Math.min(255, Math.round(L[p] * 170)))]++;
+  const tot = hist.reduce((a, b) => a + b, 0), pct = (q) => { let s = 0; for (let k = 0; k < 256; k++) { s += hist[k]; if (s >= tot * q) return k / 170; } return 1.5; };
+  const w = Math.min(0.93, pct(0.5) * 0.9), b = Math.min(pct(0.005), w - 0.35), span = w - b, gam = 1.35;
+  const lv = (v) => { const t = (v - b) / span; return t <= 0 ? 0 : t >= 1 ? 255 : 255 * Math.pow(t, gam); };
+  for (let p = 0, o = 0; p < N; p++, o += 4) {
+    if (mode === 'gray') { const v = lv(L[p] + S[p]); d[o] = d[o + 1] = d[o + 2] = v; continue; }
+    const k = 1 / G[p], s = S[p];
+    d[o] = lv(d[o] * k + s); d[o + 1] = lv(d[o + 1] * k + s); d[o + 2] = lv(d[o + 2] * k + s);
   }
   x.putImageData(im, 0, 0);
   return c;
 }
 
+// the page's real shape from the four corners (Zhang & He, whiteboard scanning): the focal length is solved from the
+// corners when they allow it, else the phone's main camera is assumed. Close to A-paper or Letter → snapped to it.
+export function pageAspect(q, imgW, imgH) {
+  const L = Math.max(imgW, imgH), u0 = imgW / 2, v0 = imgH / 2;
+  const P = q.map(([px, py]) => [px - u0, py - v0, 1]); // tl, tr, br, bl
+  const m1 = P[0], m2 = P[1], m3 = P[3], m4 = P[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const c14 = cross(m1, m4), k2 = dot(c14, m3) / dot(cross(m2, m4), m3), k3 = dot(c14, m2) / dot(cross(m3, m4), m2);
+  const n2 = m2.map((v, i) => k2 * v - m1[i]), n3 = m3.map((v, i) => k3 * v - m1[i]);
+  let f2 = Math.abs(n2[2] * n3[2]) > 1e-9 ? -(n2[0] * n3[0] + n2[1] * n3[1]) / (n2[2] * n3[2]) : -1;
+  if (!(f2 > (0.45 * L) ** 2 && f2 < (3 * L) ** 2)) f2 = (0.75 * L) ** 2;
+  const len = (n) => n[0] * n[0] / f2 + n[1] * n[1] / f2 + n[2] * n[2];
+  let r = Math.sqrt(len(n2) / len(n3)); // width / height
+  if (!Number.isFinite(r) || r <= 0) return null;
+  for (const s of [Math.SQRT2, 11 / 8.5]) for (const t of [s, 1 / s]) if (Math.abs(r / t - 1) < 0.045) r = t;
+  return r;
+}
 // a photo file as a canvas (kept under 12 MP, the iPhone's canvas limit is near 16 MP)
 export async function canvasFromBlob(blob) {
   const url = URL.createObjectURL(blob);
@@ -204,7 +250,7 @@ export async function canvasFromBlob(blob) {
   } finally { URL.revokeObjectURL(url); }
 }
 
-// the scan screen: corners to drag, 선명하게 / 컬러 그대로, 다시 찍기 / 저장. Resolves to the page or null.
+// the scan screen: corners to drag, 컬러 스캔 / 흑백 스캔 / 원본, 다시 찍기 / 저장. Resolves to the page or null.
 export function openScan(src) {
   return new Promise((resolve) => {
     const W = src.width, H = src.height;
@@ -215,7 +261,7 @@ export function openScan(src) {
     sctx.drawImage(src, 0, 0, sw, sh);
     const found = findPaper(sctx.getImageData(0, 0, sw, sh).data, sw, sh);
     let q = (found || DEFAULT_QUAD).map((p) => [...p]);
-    let clean = true, drag = -1, fit = { x: 0, y: 0, s: 1 };
+    let clean = 'color', drag = -1, fit = { x: 0, y: 0, s: 1 };
     const NS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(NS, 'svg');
     const poly = document.createElementNS(NS, 'polygon');
@@ -224,9 +270,9 @@ export function openScan(src) {
     const view = document.createElement('canvas');
     const stage = el('div', { class: 'scan-stage' }, view, svg);
     const hint = el('p', { class: 'scan-hint' }, found ? '종이를 찾았어요. 모서리가 어긋나면 동그라미를 끌어서 맞춰 주세요.' : '동그라미 4개를 종이 네 귀퉁이에 끌어다 맞춰 주세요.');
-    const seg = [['선명하게', true], ['컬러 그대로', false]].map(([l, v]) => el('button', {
+    const seg = [['컬러 스캔', 'color'], ['흑백 스캔', 'gray'], ['원본', 'none']].map(([l, v]) => el('button', {
       'aria-pressed': String(clean === v),
-      onclick: () => { clean = v; seg.forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0) === clean))); },
+      onclick: () => { clean = v; seg.forEach((b, i) => b.setAttribute('aria-pressed', String(['color', 'gray', 'none'][i] === clean))); },
     }, l));
     const save = el('button', { class: 'btn primary', onclick: () => run() }, '저장 →');
     const box = el('div', { class: 'overlay scan' },
@@ -277,7 +323,7 @@ export function openScan(src) {
       await new Promise((r) => setTimeout(r, 40));
       try {
         const out = warp(src, orderQuad(q).map(([x, y]) => [x * W, y * H]));
-        if (clean) enhance(out);
+        enhance(out, clean);
         const blob = await canvasBlob(out, 'image/jpeg', 0.9);
         const thumb = await thumbFrom(out, out.width, out.height);
         const res = { blob, thumb, w: out.width, h: out.height, mime: 'image/jpeg' };

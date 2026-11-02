@@ -65,10 +65,11 @@ export function computeNames(items, tbmLabel = '건축') {
   const byId = new Map(items.map((it) => [it.id, it]));
   const base = new Map();
   const groups = new Map();
-  const tbm = fileSafe(tbmLabel || '') || 'TBM';
+  const tbmDef = fileSafe(tbmLabel || '') || 'TBM';
   for (const it of [...items].sort((a, b) => a.ts - b.ts)) {
     if (it.fixOf) continue;
-    const place = it.tbm ? 'TBM' : it.doc ? '문서' : (it.room ? fileSafe(it.room.name) : '위치없음');
+    const tbm = it.tbm ? fileSafe(it.tbmLabel || '') || tbmDef : '';
+    const place = it.tbm ? 'TBM|' + tbm : it.doc ? '문서' : (it.room ? fileSafe(it.room.name) : '위치없음');
     const k = it.day + '|' + place;
     const n = (groups.get(k) || 0) + 1;
     groups.set(k, n);
@@ -118,6 +119,7 @@ export async function makeZip(entries, onProgress) {
   const parts = [], central = [];
   let offset = 0, i = 0;
   for (const e of entries) {
+    if (e.name) e.name = e.name.normalize('NFC'); // names inside the ZIP stay whole on Windows
     const data = e.blob || new Blob([e.text || ''], { type: 'text/plain' });
     const buf = new Uint8Array(await data.arrayBuffer());
     const crc = crc32(buf);
@@ -548,6 +550,7 @@ export function toast(msg, ms = 1800) {
 }
 
 export async function shareOrDownload(blob, name, lastModified) {
+  name = String(name).normalize('NFC');
   const file = new File([blob], name, { type: blob.type || 'application/octet-stream', ...(lastModified ? { lastModified } : {}) });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file], title: name }); return 'shared'; } catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }

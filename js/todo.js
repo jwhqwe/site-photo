@@ -61,10 +61,25 @@ export function renderTodos() {
     el('button', { class: 'todo-txt', onclick: () => edit(t) },
       el('span', {}, t.text),
       t.memo ? el('small', {}, t.memo) : null,
-      t.state === 'moved' ? el('small', { class: 'todo-note' }, `${short(t.movedTo)}로 넘김`) : t.from ? el('small', { class: 'todo-note' }, `${short(t.from)}에서 넘어옴`) : null))));
+      t.state === 'moved' ? el('small', { class: 'todo-note' }, `${short(t.movedTo)}로 넘김`) : t.from ? el('small', { class: 'todo-note' }, `${short(t.from)}에서 넘어옴`) : null,
+      t.againOf ? el('small', { class: 'todo-note' }, '어제에 이어서') : null),
+    t.state === 'done' ? againKey(t) : null)));
   $('#tEmpty').hidden = items.length > 0;
 }
 
+// done today, to do again tomorrow: one tap copies it to the next day
+function againKey(t) {
+  const next = addDays(t.day, 1), has = T.list.some((x) => x.againOf === t.id);
+  return el('button', {
+    class: 'todo-again', 'aria-pressed': String(has),
+    onclick: async () => {
+      if (has) { T.list = T.list.filter((x) => !(x.againOf === t.id && x.state === 'todo')); toast('내일 할 일에서 뺐어요'); }
+      else { T.list.push({ id: uid('t'), day: next, text: t.text, memo: '', state: 'todo', againOf: t.id, ts: Date.now(), order: nextOrder(next) }); toast(`${short(next)}에도 넣었어요`); }
+      renderTodos();
+      await save();
+    },
+  }, has ? '내일도 ✓' : '내일도');
+}
 async function cycle(t) {
   t.state = NEXT[t.state] || 'todo';
   renderTodos(); // show it at once; saving follows

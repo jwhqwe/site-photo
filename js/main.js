@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.9.3';
+const APP_VERSION = '1.10.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -64,7 +64,13 @@ function setItems(list) {
   S.byId = new Map(S.items.map((i) => [i.id, i]));
   S.names = null;
 }
-function names() { if (!S.names) S.names = computeNames(vis(), S.settings.tbmName); return S.names; }
+function names() { if (!S.names) S.names = computeNames(vis(), tbmLabels()[0]); return S.names; }
+// TBM photos are named by trade: "261102 건축", "261102 안전_2" …
+function tbmLabels() {
+  const a = S.settings.tbmLabels && S.settings.tbmLabels.length ? S.settings.tbmLabels : [S.settings.tbmName || '건축', '안전', '전기'];
+  return [...new Set(a.map((x) => String(x).trim()).filter(Boolean))];
+}
+const tbmOf = (it) => it.tbmLabel || tbmLabels()[0];
 function nameOf(it) { return (names().get(it.id) || it.id) + '.' + extOf(it); }
 function remember(it) {
   if (S.byId.has(it.id)) { const k = S.items.findIndex((x) => x.id === it.id); S.items[k] = it; }
@@ -230,6 +236,102 @@ function colSpec(floorKey, mark) {
   const hoop = r.mid && r.end && r.end !== r.mid ? `대근 ${r.mid} (상·하부 ${r.end})` : r.mid ? `대근 ${r.mid}` : '';
   return [r.size, r.main ? `주근 ${r.main}` : '', hoop, r.steel ? `철골 ${r.steel}` : ''].filter(Boolean).join(' · ');
 }
+// ---------------------------------------------------------------- numbered photos
+// A memo whose first line ends in _01, _02 … belongs to a series ("D구간 B2F 합벽 재려분리_03"). The app suggests the next
+// number while shooting, numbers chosen photos in one go, and tells when a series is complete: numbers 1..N with no
+// gap or repeat, and no un-numbered photo in the middle of it (or right after it in the same room).
+const SERIES_RE = /^(.*\S)\s*_(\d{1,3})\s*$/;
+function seriesOf(it) {
+  const m = SERIES_RE.exec(((it && it.memo) || '').split('\n')[0]);
+  return m ? { base: m[1].trim(), n: +m[2], w: m[2].length } : null;
+}
+const numText = (base, n, w = 2) => `${base}_${String(n).padStart(w, '0')}`;
+// the memo with its first line set to the numbered name (other lines kept)
+function withNumber(memo, base, n, w) {
+  const lines = (memo || '').split('\n');
+  if (SERIES_RE.test(lines[0])) lines[0] = numText(base, n, w); else lines.unshift(numText(base, n, w));
+  return lines.filter((l, i) => i === 0 || l.trim()).join('\n');
+}
+function allSeries() {
+  const map = new Map(), list = vis().filter((i) => !i.draft);
+  for (const it of list) {
+    const s = seriesOf(it);
+    if (!s) continue;
+    if (!map.has(s.base)) map.set(s.base, { base: s.base, w: s.w, items: [] });
+    map.get(s.base).items.push({ it, n: s.n });
+  }
+  const near = (a, b) => (a.room && b.room && a.room.name === b.room.name) || (a.members || []).some((m) => (b.members || []).some((x) => x.id === m.id));
+  for (const g of map.values()) {
+    g.items.sort((a, b) => a.n - b.n || a.it.ts - b.it.ts);
+    const ns = g.items.map((x) => x.n);
+    g.max = Math.max(...ns);
+    g.missing = [];
+    for (let k = 1; k <= g.max; k++) if (!ns.includes(k)) g.missing.push(k);
+    g.dup = [...new Set(ns.filter((n, i) => ns.indexOf(n) !== i))];
+    const ts = g.items.map((x) => x.it.ts), t0 = Math.min(...ts), t1 = Math.max(...ts);
+    const floors = new Set(g.items.map((x) => x.it.floor).filter(Boolean)), ids = new Set(g.items.map((x) => x.it.id));
+    const last = g.items.find((x) => x.it.ts === t1).it;
+    g.loose = list.filter((i) => !ids.has(i.id) && !i.tbm && !i.doc && !seriesOf(i) && (
+      (i.ts > t0 && i.ts < t1 && (!i.floor || !floors.size || floors.has(i.floor))) || // in the middle of the series
+      (i.ts > t1 && i.ts - t1 < 15 * 60e3 && near(i, last)))); // just after it, same room or member
+    g.days = new Set(g.items.map((x) => x.it.day));
+    g.done = !g.missing.length && !g.dup.length && !g.loose.length;
+  }
+  return [...map.values()];
+}
+// the series being shot now: the latest numbered photo of today, within the hour
+function activeSeries() {
+  const t = vis().filter((i) => i.day === today() && !i.draft && seriesOf(i)).sort((a, b) => b.ts - a.ts)[0];
+  if (!t || Date.now() - t.ts > 60 * 60e3) return null;
+  const s = seriesOf(t), g = allSeries().find((x) => x.base === s.base);
+  return { base: s.base, w: s.w, next: (g ? g.max : s.n) + 1 };
+}
+function seriesState(g) {
+  if (g.done) return `끝 · ${numText('', 1, g.w).slice(1)}–${numText('', g.max, g.w).slice(1)}`;
+  return [g.missing.length ? `빠진 번호 ${g.missing.map((n) => numText('', n, g.w).slice(1)).join(', ')}` : '',
+    g.dup.length ? `겹친 번호 ${g.dup.map((n) => numText('', n, g.w).slice(1)).join(', ')}` : '',
+    g.loose.length ? `번호 없는 사진 ${g.loose.length}장` : ''].filter(Boolean).join(' · ');
+}
+function renderSeriesCard(day) {
+  const card = $('#seriesCard'), list = allSeries().filter((g) => g.days.has(day));
+  card.hidden = !list.length;
+  if (!list.length) return;
+  card.replaceChildren(el('h3', {}, '번호 붙인 사진', el('small', { class: list.every((g) => g.done) ? 'ok' : 'warn' }, list.every((g) => g.done) ? '모두 끝' : '확인할 것 있음')),
+    ...list.map((g) => el('div', { class: 'series-row' + (g.done ? ' done' : '') },
+      el('button', { class: 'series-txt', onclick: () => openViewer((g.loose[0] || g.items[0].it).id) },
+        el('b', {}, g.base), el('small', {}, `${g.items.length}장 · ${seriesState(g)}`)),
+      g.done ? null : el('button', { class: 'btn small', onclick: () => renumber(g) }, '다시 매기기'))));
+}
+// numbers the series (and the un-numbered photos found in it) again from 01, in the order they were taken
+async function renumber(g) {
+  const all = [...g.items.map((x) => x.it), ...g.loose].sort((a, b) => a.ts - b.ts);
+  const ok = await confirmBox('번호 다시 매기기', `"${g.base}" ${all.length}장을 찍은 순서대로 ${numText('', 1, g.w).slice(1)}부터 다시 붙여요.` + (g.loose.length ? `\n번호 없던 ${g.loose.length}장도 넣어요.` : ''), '다시 매기기');
+  if (!ok) return;
+  await putRecords(all.map((it, i) => ({ ...it, ...memoPatch(it, withNumber(it.memo, g.base, i + 1, g.w)) })));
+  renderCurrent();
+  toast(`${all.length}장에 번호를 붙였어요`);
+}
+// number the chosen photos: the series' next numbers, in the order they were taken
+async function numberSelected(sel) {
+  const act = activeSeries(), first = sel.map(seriesOf).find(Boolean);
+  const guess = first ? first.base : act ? act.base : ((sel[0].memo || '').split('\n')[0] || '').trim();
+  const base = await promptText(`번호 붙이기 · ${sel.length}장`, guess, { multiline: false, placeholder: '예: D구간 B2F 합벽 재려분리', hint: '이 이름 뒤에 _01, _02 …가 찍은 순서대로 붙어요. 이미 있는 번호 다음부터 이어 붙여요.' });
+  if (!base) return;
+  const g = allSeries().find((x) => x.base === base), w = g ? g.w : 2;
+  let n = g ? g.max : 0;
+  const todo = sel.filter((i) => { const s = seriesOf(i); return !s || s.base !== base; }).sort((a, b) => a.ts - b.ts);
+  await putRecords(todo.map((it) => ({ ...it, ...memoPatch(it, withNumber(it.memo, base, ++n, w)) })));
+  D.selecting = false;
+  D.sel.clear();
+  renderDays();
+  toast(`${todo.length}장에 번호를 붙였어요 (${numText('', n - todo.length + 1, w).slice(1)}–${numText('', n, w).slice(1)})`);
+}
+// what goes on a shared photo: where it was taken (층 · 실 · 그리드 · 부재), then the memo
+function photoText(it) {
+  const where = it.tbm || it.doc || !it.pin || S.settings.placeOn === false ? ''
+    : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid, it.noMember ? '' : memberText(it)].filter(Boolean).join(' · ');
+  return [where, it.memo || ''].filter(Boolean).join('\n');
+}
 function memberText(it) {
   if (it.noMember) return '부재 없음';
   return (it.members || []).map((m) => m.mark || m.type).join(' · ');
@@ -324,9 +426,64 @@ async function renderLenses() {
   const zoomOut = !uw && caps && caps.zoom && caps.zoom.min < 1;
   const opts = [...(uw ? [{ key: '0.5x', id: uw.id, z: 1 }] : zoomOut ? [{ key: '0.5x', id: wide ? wide.id : null, z: Math.max(0.5, caps.zoom.min) }] : []),
     { key: '1x', id: wide ? wide.id : null, z: 1 }, { key: '2x', id: wide ? wide.id : null, z: 2 }];
+  lensOpts = opts;
   box.replaceChildren(...opts.map((o) => el('button', {
     'aria-pressed': String(o.key === cam.lens), onclick: () => pickLens(o),
   }, o.key.replace('x', '×'))));
+}
+// pinch on the viewfinder, like the phone camera: spread to zoom in (camera zoom if Safari offers it, else the middle
+// of the picture, up to 5×), pinch below 1× to go to the 0.5× camera, spread on 0.5× to come back to 1×
+let lensOpts = [];
+function bindCamPinch() {
+  const v = $('.cam-view');
+  let P = null, want = null, running = false, tagTimer = 0;
+  const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY) || 1;
+  const tag = (z) => {
+    let t = $('#camZoomTag');
+    if (!t) { t = el('div', { id: 'camZoomTag', class: 'zoom-tag' }); v.append(t); }
+    t.textContent = `${Math.round(z * 10) / 10}×`;
+    t.hidden = false;
+    clearTimeout(tagTimer);
+    tagTimer = setTimeout(() => { t.hidden = true; }, 900);
+  };
+  const run = async () => { // one zoom change at a time, always the latest
+    if (running || want == null) return;
+    running = true;
+    const z = want;
+    want = null;
+    try { await cam.setZoom(z); } catch (e) { /* stays */ }
+    running = false;
+    if (want != null) run();
+  };
+  const maxZoom = () => { const c = cam.track && cam.track.getCapabilities ? cam.track.getCapabilities() : null; return Math.min(c && c.zoom && c.zoom.max > 1 ? c.zoom.max : 5, 10); };
+  v.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 2 || !cam.active) return;
+    const c = cam.track && cam.track.getCapabilities ? cam.track.getCapabilities() : null;
+    if (cam.recording && !(c && c.zoom)) return; // the middle-of-the-picture zoom would not be in the video
+    e.preventDefault();
+    P = { d: dist(e.touches), z: cam.zoom || 1, lens: cam.lens, r: 1 };
+  }, { passive: false });
+  v.addEventListener('touchmove', (e) => {
+    if (!P || e.touches.length !== 2) return;
+    e.preventDefault();
+    P.r = dist(e.touches) / P.d;
+    if (P.lens === '0.5x') { tag(Math.max(0.5, Math.min(1, 0.5 * P.r))); return; } // the switch happens on lifting
+    const z = Math.max(1, Math.min(maxZoom(), P.z * P.r));
+    tag(P.z * P.r < 0.85 && lensOpts.some((o) => o.key === '0.5x') ? 0.5 : z);
+    want = z;
+    run();
+  }, { passive: false });
+  const end = (e) => {
+    if (!P || e.touches.length >= 2) return;
+    const p = P;
+    P = null;
+    const uw = lensOpts.find((o) => o.key === '0.5x'), one = lensOpts.find((o) => o.key === '1x');
+    if (p.lens === '0.5x' && p.r > 1.5 && one) pickLens(one);
+    else if (p.lens !== '0.5x' && p.z * p.r < 0.85 && uw) pickLens(uw);
+    else setTimeout(renderLenses, 150);
+  };
+  v.addEventListener('touchend', end);
+  v.addEventListener('touchcancel', end);
 }
 async function pickLens(o) {
   if (camBusy || o.key === cam.lens) return;
@@ -366,8 +523,15 @@ function renderCamLast() {
 function renderCamBanner() {
   const b = $('#camBanner');
   if (S.mode === 'tbm') {
+    // which trade the next TBM photo is for; each key shows today's count
+    const cur = S.tbmLabel && tbmLabels().includes(S.tbmLabel) ? S.tbmLabel : (S.tbmLabel = tbmLabels()[0]);
+    const todays = vis().filter((i) => i.tbm && i.day === today());
     b.className = 'cam-banner tbm';
-    b.replaceChildren(el('span', {}, `TBM 사진 찍는 중 · 오늘 ${S.tbmCount}장`), el('button', { onclick: endTbm }, 'TBM 끝내기 ✕'));
+    b.replaceChildren(el('span', {}, 'TBM'),
+      el('div', { class: 'tbm-keys' }, ...tbmLabels().map((l) => el('button', {
+        'aria-pressed': String(l === cur), onclick: () => { S.tbmLabel = l; renderCamBanner(); },
+      }, l, el('small', {}, ' ' + todays.filter((i) => tbmOf(i) === l).length)))),
+      el('button', { onclick: endTbm }, '끝내기 ✕'));
     b.hidden = false;
   } else if (S.mode === 'target' && S.target) {
     b.className = 'cam-banner tbm';
@@ -447,13 +611,13 @@ async function onCaptured(media) {
   const ts = Date.now();
   if (media.kind === 'photo') media = { ...media, blob: await outBlob({ kind: 'photo', ts, w: media.w, h: media.h }, media.blob) };
   if (S.mode === 'tbm') {
-    const it = newRecord(media, ts, { tbm: true, floor: null, heading: snap.heading, pitch: snap.pitch });
+    const it = newRecord(media, ts, { tbm: true, tbmLabel: S.tbmLabel || tbmLabels()[0], floor: null, heading: snap.heading, pitch: snap.pitch });
     try { await putItem(it, media.blob, media.thumb); }
     catch (e) { alertBox('저장하지 못했어요', (e && e.message) || '저장 공간이 부족할 수 있어요.'); return; }
     S.tbmCount++;
     renderCamBanner();
     renderCamLast();
-    toast(`TBM 사진 저장 (${S.tbmCount}장)`);
+    toast(`TBM ${it.tbmLabel} 저장 · ${nameOf(it)}`);
     return;
   }
   if (S.mode === 'target' && S.target) {
@@ -500,7 +664,7 @@ async function recPhoto() {
     if (!raw) throw new Error('찍지 못했어요');
     const ts = Date.now(), snap = sensors.snapshot(), t = await imageThumb(raw);
     const blob = await outBlob({ kind: 'photo', ts, w, h }, raw);
-    const extra = S.mode === 'tbm' ? { tbm: true, floor: null } : S.mode === 'target' && S.target ? targetFields(S.target) : {};
+    const extra = S.mode === 'tbm' ? { tbm: true, tbmLabel: S.tbmLabel || tbmLabels()[0], floor: null } : S.mode === 'target' && S.target ? targetFields(S.target) : {};
     const it = newRecord({ blob, kind: 'photo', mime: 'image/jpeg', lens: cam.lens, w, h }, ts, { ...extra, heading: snap.heading, pitch: snap.pitch });
     await putItem(it, blob, t.thumb);
     if (!extra.tbm && !extra.pin) REC.photos.push(it.id);
@@ -672,14 +836,14 @@ async function outBlob(it, blob) {
 }
 // what a share hands over: the memo drawn on the picture (unless it is turned off) and the date inside the file
 async function shareBlob(it, blob) {
-  if (it.kind === 'photo' && it.memo && !it.memoOff) {
-    try { blob = await burnMemo(blob, it.memo, await ensureMemoPos(it)); } catch (e) { /* the photo without the memo */ }
+  if (it.kind === 'photo' && photoText(it) && !it.memoOff) {
+    try { blob = await burnMemo(blob, photoText(it), await ensureMemoPos(it)); } catch (e) { /* the photo without the memo */ }
   }
   return outBlob(it, blob);
 }
 function shareFiles(list) {
   try {
-    const files = list.map((x) => new File([x.blob], x.name, { type: x.mime || x.blob.type || 'image/jpeg', lastModified: x.ts || Date.now() }));
+    const files = list.map((x) => new File([x.blob], String(x.name).normalize('NFC'), { type: x.mime || x.blob.type || 'image/jpeg', lastModified: x.ts || Date.now() }));
     if (!navigator.share || !navigator.canShare || !navigator.canShare({ files })) return Promise.resolve('unsupported');
     return navigator.share({ files }).then(() => 'shared', (e) => (e && e.name === 'AbortError' ? 'cancelled' : 'failed'));
   } catch (e) {
@@ -718,7 +882,7 @@ async function shareBatch(list) {
   if (!files.length) { toast('파일을 찾지 못했어요'); return; }
   const size = files.reduce((t, x) => t + x.blob.size, 0);
   const already = list.filter((i) => S.shared.has(i.id)).length;
-  const memos = list.filter((i) => i.kind === 'photo' && i.memo && !i.memoOff).length;
+  const memos = list.filter((i) => i.kind === 'photo' && photoText(i) && !i.memoOff).length;
   await openDialog((box, close) => {
     const go = el('button', {
       class: 'btn primary',
@@ -906,6 +1070,15 @@ function renderSheet() {
   save.textContent = C.ghost ? '그대로' : '저장';
   save.disabled = !C.ghost && !C.pin;
   $('#shMemo').textContent = C.memo ? '메모 ✓' : '메모';
+  const act = C.mode === 'new' || C.mode === 'fix' ? activeSeries() : null, sh = $('#shSeries');
+  sh.hidden = !act;
+  if (act) {
+    const name = numText(act.base, act.next, act.w), on = (C.memo || '').split('\n')[0] === name;
+    sh.replaceChildren(el('button', {
+      class: 'series-chip', 'aria-pressed': String(on),
+      onclick: () => { C.memo = on ? (C.memo || '').split('\n').slice(1).join('\n') : withNumber(C.memo, act.base, act.next, act.w); renderSheet(); },
+    }, on ? `✓ ${name}` : `번호 이어서: ${name}`));
+  }
 }
 function renderSheetInfo() {
   const st = C.ghost || C;
@@ -1090,7 +1263,13 @@ function renderViewerActions(it) {
   }
   if (!it.tbm && !it.doc) A.push(btn(it.pin ? '위치 고치기' : '위치 붙이기', () => openSheet({ mode: 'edit', item: it }), it.pin ? '' : 'primary'));
   A.push(btn('메모', () => editMemo(it)));
-  if (it.kind === 'photo' && it.memo) A.push(btn(it.memoOff ? '사진에 메모 보이기' : '사진에서 메모 숨기기', () => toggleMemoOn(it)));
+  if (it.tbm) {
+    A.push(el('div', { class: 'pair tbm-pick' }, ...tbmLabels().map((l) => el('button', {
+      class: 'btn small', 'aria-pressed': String(tbmOf(it) === l),
+      onclick: async () => { if (tbmOf(it) === l) return; await putItem({ ...S.byId.get(it.id), tbmLabel: l }); S.names = null; renderViewer(); renderCurrent(); },
+    }, 'TBM ' + l))));
+  }
+  if (it.kind === 'photo' && photoText(it)) A.push(btn(it.memoOff ? '사진에 글 보이기' : '사진에서 글 숨기기', () => toggleMemoOn(it)));
   if (it.kind === 'photo') A.push(btn('돌리기 ↻', () => rotateItem(it)));
   A.push(btn('공유', () => shareOne(it)));
   $('#vActions').replaceChildren(...A);
@@ -1278,11 +1457,11 @@ async function renderMemoOn() {
   const wrap = $('#vMedia .v-photo');
   if (!it || !wrap) return;
   for (const o of wrap.querySelectorAll('.memo-on')) o.remove();
-  if (it.kind !== 'photo' || !it.memo || it.memoOff) return;
+  if (it.kind !== 'photo' || !photoText(it) || it.memoOff) return;
   const pos = await ensureMemoPos(it);
   if (!V.item || V.item.id !== it.id || wrap.querySelector('.memo-on')) return;
   const s = Math.min(wrap.clientWidth, wrap.clientHeight), fs = MEMO.fs * s, m = MEMO.edge * s + 'px';
-  const box = el('div', { class: 'memo-on', title: '끌어서 옮기기' }, it.memo);
+  const box = el('div', { class: 'memo-on', title: '끌어서 옮기기' }, photoText(it));
   Object.assign(box.style, { fontSize: fs + 'px', padding: `${MEMO.padY * fs}px ${MEMO.padX * fs}px`, borderRadius: MEMO.r * fs + 'px' });
   box.style[pos[0] === 't' ? 'top' : 'bottom'] = m;
   box.style[pos[1] === 'l' ? 'left' : 'right'] = m;
@@ -1420,7 +1599,7 @@ function renderDays() {
   const row = el('div', { class: 'row' },
     day === today() ? el('button', { class: 'add', onclick: startTbm }, '+ 찍기') : null,
     el('button', { class: 'add', onclick: () => importMedia(day, true) }, '+ 앨범'),
-    ...tbm.map((it) => cellFor(it, { selectable: true })));
+    ...tbm.map((it) => cellFor(it, { selectable: true, label: `${tbmOf(it)} ${timeOf(it.ts)}` })));
   // the row folds away with the arrow (remembered)
   const open = !S.settings.tbmFold;
   row.hidden = !open;
@@ -1432,6 +1611,7 @@ function renderDays() {
     onclick: () => { S.settings.tbmFold = open; saveSettings(); renderCurrent(); },
   }, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요'), chev)), row);
 
+  renderSeriesCard(day);
   $('#dGrid').replaceChildren(...rest.map((it) => cellFor(it, { selectable: true })));
   $('#dEmpty').hidden = rest.length > 0;
   $('#dCount').textContent = rest.length ? `사진 ${rest.length}장` : '사진';
@@ -1442,7 +1622,7 @@ function renderSelBar() {
   $('#dSelBar').hidden = !D.selecting;
   $('#scr-days').classList.toggle('selecting', D.selecting);
   $('#dSelCount').textContent = `${D.sel.size}개`;
-  for (const id of ['dSelMemo', 'dSelShare', 'dSelReport', 'dSelExport', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
+  for (const id of ['dSelMemo', 'dSelNum', 'dSelShare', 'dSelReport', 'dSelExport', 'dSelDelete']) $('#' + id).disabled = D.sel.size === 0;
 }
 // ---------------------------------------------------------------- drag to select (day page)
 // In 선택 mode, slide sideways across photos to select them; moving up or down then takes whole rows, like the
@@ -1606,6 +1786,11 @@ async function openCalendar() {
 async function importMedia(day, tbm, target = null) {
   const files = await pickFiles({ accept: tbm ? 'image/*' : 'image/*,video/*', multiple: true });
   if (!files.length) return;
+  let tbmLabel = tbmLabels()[0];
+  if (tbm && tbmLabels().length > 1) {
+    tbmLabel = await choose(`TBM 사진 ${files.length}장 · 어느 공종인가요?`, tbmLabels().map((l) => ({ label: l, value: l })));
+    if (!tbmLabel) return;
+  }
   const b = busy('사진 넣는 중…');
   let k = 0;
   try {
@@ -1619,14 +1804,15 @@ async function importMedia(day, tbm, target = null) {
         : shot && dayOf(shot) === day ? shot : f.lastModified && dayOf(f.lastModified) === day ? f.lastModified : dayStart(day) + 8 * 3600e3 + k * 1000;
       const blob = isVideo ? f : await outBlob({ kind: 'photo', ts, w: t.w, h: t.h }, f);
       const media = { blob, kind: isVideo ? 'video' : 'photo', mime: f.type || 'image/jpeg', lens: 'album', w: t.w, h: t.h };
-      await putItem(newRecord(media, ts, target ? targetFields(target) : tbm ? { tbm: true, floor: null } : {}), blob, t.thumb);
+      await putItem(newRecord(media, ts, target ? targetFields(target) : tbm ? { tbm: true, tbmLabel, floor: null } : {}), blob, t.thumb);
       k++;
       b.set(`사진 넣는 중… ${k}/${files.length}`);
     }
   } catch (e) {
     alertBox('일부만 넣었어요', `${k}개를 넣었어요. ${(e && e.message) || ''}`);
   } finally { b.done(); }
-  if (k) toast(target ? `${target.mark}에 ${k}개를 올렸어요` : tbm ? `TBM 사진 ${k}장을 넣었어요` : `${k}개를 넣었어요. 위치는 사진을 눌러 붙이세요.`, 2600);
+  if (k) S.names = null;
+  if (k) toast(target ? `${target.mark}에 ${k}개를 올렸어요` : tbm ? `TBM ${tbmLabel} 사진 ${k}장을 넣었어요` : `${k}개를 넣었어요. 위치는 사진을 눌러 붙이세요.`, 2600);
   renderCurrent();
   if (target && S.tab === 'plan' && S.planTap) onPlanTap(S.planTap);
 }
@@ -2350,18 +2536,24 @@ async function renderMore() {
     el('p', {}, '앱 카메라는 아이폰이 앱을 열 때마다 카메라 허용을 물어봐요(아이폰이 홈 화면 앱의 허용을 기억하지 않아요). 기본 카메라는 묻지 않아요.'),
     seg, camList));
   const hasSensor = sensors.heading != null;
-  const tbmName = S.settings.tbmName || '건축';
+  const labs = tbmLabels();
   parts.push(group('TBM 사진 이름',
-    el('p', {}, `TBM 사진은 "${yymmdd(today())} ${tbmName}"처럼 이름이 붙어요. 같은 날 두 장째부터는 _2, _3이 붙어요.`),
+    el('p', {}, `공종: ${labs.join(', ')}. TBM 찍을 때 위의 공종 키를 고르면 "${yymmdd(today())} ${labs[0]}", "${yymmdd(today())} ${labs[0]}_2"처럼 공종마다 따로 번호가 붙어요.`),
     btns(btn('바꾸기', async () => {
-      const t = await promptText('TBM 사진 이름', tbmName, { placeholder: '예: 건축', multiline: false, hint: '날짜 뒤에 붙는 말이에요.' });
+      const t = await promptText('TBM 공종', labs.join(', '), { placeholder: '예: 건축, 안전, 전기', multiline: false, hint: '쉼표로 나눠 적어요. 첫 번째가 기본이에요.' });
       if (t === null || !t.trim()) return;
-      S.settings.tbmName = t.trim();
+      S.settings.tbmLabels = [...new Set(t.split(/[,，、]/).map((x) => x.trim()).filter(Boolean))];
       S.names = null;
       saveSettings();
       renderMore();
       renderCurrent();
     }))));
+  const placeOn = S.settings.placeOn !== false;
+  parts.push(group('사진에 쓰는 글',
+    el('p', {}, '공유하는 사진에 메모와 함께 위치(층 · 실 · 그리드 · 부재)를 써요. 사진 보기에서 글을 끌어 옮기거나 사진마다 숨길 수 있어요.'),
+    el('div', { class: 'seg' }, ...[[true, '위치도 쓰기'], [false, '메모만']].map(([v, l]) => el('button', {
+      'aria-pressed': String(placeOn === v), onclick: () => { S.settings.placeOn = v; saveSettings(); renderMore(); },
+    }, l)))));
   parts.push(group('나침반',
     el('p', {}, hasSensor ? `지금 나침반 ${Math.round(sensors.heading)}°` : '나침반 값이 아직 없어요. "센서 켜기"를 눌러 허용해 주세요.'),
     el('p', {}, `보정값 ${S.settings.calib > 0 ? '+' : ''}${S.settings.calib || 0}° · 부재 없이 찍을 때 방향을 정하는 데 써요. 철골·철근 가까이에서는 틀릴 수 있어요.`),
@@ -2459,6 +2651,7 @@ function bindUI() {
   $$('#tabs button').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
   // camera
   $('#camShutter').onclick = onShutter;
+  bindCamPinch();
   // the first tap on the camera screen asks for the motion sensors, so they already run at the first photo
   // (not the 기본 카메라 key: iPhone shows one system window at a time)
   $('#scr-camera').addEventListener('click', (e) => { if (!sensors.asked && !e.target.closest('#camNative')) sensors.requestPermission(); }, { capture: true });
@@ -2520,6 +2713,7 @@ function bindUI() {
     renderDays();
   };
   $('#dSelReport').onclick = () => makeReport([...D.sel].map((id) => S.byId.get(id)));
+  $('#dSelNum').onclick = () => { const sel = [...D.sel].map((id) => S.byId.get(id)).filter(Boolean); if (sel.length) numberSelected(sel); };
   $('#dSelExport').onclick = () => exportItems([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
   $('#dSelShare').onclick = () => shareBatch([...D.sel].map((id) => S.byId.get(id)).filter(Boolean));
   bindDragSelect();
