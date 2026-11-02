@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -237,6 +237,19 @@ function colSpec(floorKey, mark) {
   if (!r) return '';
   const hoop = r.mid && r.end && r.end !== r.mid ? `대근 ${r.mid} (상·하부 ${r.end})` : r.mid ? `대근 ${r.mid}` : '';
   return [r.size, r.main ? `주근 ${r.main}` : '', hoop, r.steel ? `철골 ${r.steel}` : ''].filter(Boolean).join(' · ');
+}
+// bars of a member from the drawing file: columns (기둥 일람표), walls (벽체 배근 일람표), basement walls (지하 외벽 배근도,
+// per storey and face). Plan marks may carry the thickness: "RW2C(500)".
+function memberSpec(floorKey, m) {
+  if (!m || !m.mark) return '';
+  const col = colSpec(floorKey, m.mark);
+  if (col) return col;
+  const P = S.pkg || {}, mt = /^(.*?)\((\d+)\)$/.exec(m.mark), base = mt ? mt[1] : m.mark, thick = mt ? mt[2] : '';
+  const w = P.walls && P.walls[base], r = w && w[floorKey];
+  if (r && r.v && r.v !== '-') return [r.t ? `두께 ${r.t}` : '', `수직 ${r.v}`, r.h ? `수평 ${r.h}` : '', r.add && r.add !== '-' ? `보강 ${r.add}` : ''].filter(Boolean).join(' · ');
+  const rw = P.rw && P.rw[base], s = rw && (rw[floorKey] || rw.all);
+  if (s) return [thick ? `두께 ${thick}` : '', s.in && s.in.length ? `내부 ${s.in.join(', ')}` : '', s.out && s.out.length ? `외부 ${s.out.join(', ')}` : ''].filter(Boolean).join(' · ');
+  return '';
 }
 // ---------------------------------------------------------------- numbered photos
 // A memo whose first line ends in _01, _02 … belongs to a series ("D구간 B2F 합벽 재려분리_03"). The app suggests the next
@@ -1163,7 +1176,7 @@ function renderSheetInfo() {
   const rows = [line(C.ghost ? '지난 위치' : '위치', where)];
   if (st.noMember) rows.push(line('부재', '없음 · 방향만 기록'));
   else rows.push(line('부재', ...(st.members.length ? st.members.map((m) => el('span', { class: 'chipm' }, m.mark || m.type)) : ['도면에서 눌러 고르세요'])));
-  if (!st.noMember) for (const m of st.members) { const t = colSpec(C.floor, m.mark); if (t) rows.push(line('배근', `${m.mark} ${t}`)); }
+  if (!st.noMember) for (const m of st.members) { const t = memberSpec(C.floor, m); if (t) rows.push(line('배근', `${m.mark} ${t}`)); }
   const fan = computeFan(st, C.item);
   rows.push(line('방향', fan ? `${bearingText(fan.dir)} · ${SRC[fan.src]}` : '없음', C.item.pitch != null ? ` · 기울기 ${pitchText(C.item.pitch)}` : ''));
   box.replaceChildren(...rows);
@@ -1308,7 +1321,7 @@ function renderViewerInfo(it) {
     add('위치', it.pin ? (it.room ? it.room.name + (it.room.code && it.room.code !== it.room.name ? ` (${it.room.code})` : '') : '실 밖') : '아직 안 정했어요');
     if (it.pin) add('그리드', it.grid);
     add('부재', it.noMember ? '없음' : memberText(it) || (it.pin ? '안 고름' : ''));
-    if (!it.noMember) for (const m of it.members || []) { const t = colSpec(it.floor, m.mark); if (t) add('배근', `${m.mark} ${t}`); }
+    if (!it.noMember) for (const m of it.members || []) { const t = memberSpec(it.floor, m); if (t) add('배근', `${m.mark} ${t}`); }
     if (it.fan) add('방향', `${bearingText(it.fan.dir)} · ${SRC[it.fan.src] || ''}`);
   }
   if (it.pitch != null) add('기울기', pitchText(it.pitch));
@@ -1987,7 +2000,7 @@ function onPlanTap(p) {
     const near = list.length ? [] : located.filter((i) => Math.hypot(i.pin[0] - p[0], i.pin[1] - p[1]) < 22 * PV.ptPerPx());
     title = `${target.mark} · ${list.length ? `${list.length}장` : near.length ? `사진 없음 · 근처 ${near.length}장` : '사진 없음'}`;
     if (near.length) list = near;
-    const spec = colSpec(fl.key, m.mark);
+    const spec = memberSpec(fl.key, m);
     if (spec) title += `\n${spec}`;
   }
   if (!list.length && !target) {
