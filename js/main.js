@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.12.1';
+const APP_VERSION = '1.12.2';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -421,7 +421,7 @@ async function startCamera() {
     }
     if (S.tab !== 'camera') scheduleCamStop();
     hideCamStart();
-    renderLenses();
+    renderLenses().then(placeToast, placeToast);
   } catch (e) {
     const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
     showCamStart(denied ? '카메라 권한이 필요해요. 버튼을 누르고 "허용"을 눌러 주세요.' : `카메라를 켜지 못했어요 (${(e && (e.message || e.name)) || '알 수 없음'}).`,
@@ -2714,12 +2714,21 @@ function showTab(t) {
   if (t !== 'camera' && cam.recording) finishRecording(); // leaving the camera ends the video
   if (t !== 'days' && D.selecting) { D.selecting = false; D.sel.clear(); }
   if (t === 'days' && prev === 'days') S.day = today();
+  placeToast();
   if (t === 'camera') { renderCamTop(); startCamera(); }
   else if (t === 'plan') renderPlanTab();
   else if (t === 'days') renderDays();
   else if (t === 'issues') renderIssues();
   else if (t === 'todo') { if (prev !== 'todo') showTodoToday(); renderTodos(); }
   else if (t === 'more') renderMore();
+}
+// on the camera screen a message shows over the lens keys: not over the picture being framed, not over the shutter
+function placeToast() {
+  const lens = $('#camLens'), deck = $('.cam-deck'), root = document.documentElement;
+  if (S.tab !== 'camera' || !deck || !deck.offsetHeight) { root.style.removeProperty('--toast-b'); return; }
+  const r = lens && lens.offsetHeight ? lens.getBoundingClientRect() : null;
+  const b = r ? window.innerHeight - r.bottom + Math.max(0, (r.height - 40) / 2) : window.innerHeight - deck.getBoundingClientRect().top - 52;
+  root.style.setProperty('--toast-b', `${Math.round(b)}px`);
 }
 function renderCurrent() {
   updateBadge();
@@ -2836,6 +2845,7 @@ function bindUI() {
     if (S.tab === 'camera' && $('#sheet').hidden && S.pkg) startCamera();
   });
   sensors.onturn = renderCamTurn;
+  window.addEventListener('resize', placeToast);
   bindViewerGestures();
   bindTodos();
 }
