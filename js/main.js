@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 const APP_DATE = '2026-11-01';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -2829,8 +2829,10 @@ function bindUI() {
   let hiddenAt = 0;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
-    // back after a while (or on another day): TBM mode is over
-    if (S.mode === 'tbm' && (Date.now() - hiddenAt > 10 * 60e3 || dayOf(hiddenAt) !== today())) { S.mode = 'normal'; renderCamBanner(); }
+    // back after a while (or on another day): TBM mode is over. iPhone can report "shown" without having reported
+    // "hidden" (around its permission windows, e.g. the camera prompt right after + 찍기): that is not a return.
+    if (S.mode === 'tbm' && hiddenAt && (Date.now() - hiddenAt > 10 * 60e3 || dayOf(hiddenAt) !== today())) { S.mode = 'normal'; renderCamBanner(); }
+    hiddenAt = 0;
     if (S.tab === 'camera' && $('#sheet').hidden && S.pkg) startCamera();
   });
   sensors.onturn = renderCamTurn;
