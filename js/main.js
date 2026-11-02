@@ -11,21 +11,36 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.12.2';
-const APP_DATE = '2026-11-01';
+const APP_VERSION = '1.12.3';
+const APP_DATE = '2026-11-03';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
+// The gauge fills 0 → 100 %: it follows the start-up steps, never runs ahead of them, and is paced so it reaches 100 %
+// just as the screen closes (a quick start fills it smoothly over the 2.5 s instead of jumping and waiting).
 const SPLASH_MIN_MS = 2500;
 const SPLASH_FROM = performance.now();
+const SPL = { real: 0 };
+function splashProgress(p) { SPL.real = Math.max(SPL.real, p); }
+function splashTick() {
+  const sp = document.getElementById('splash'), fill = document.getElementById('splashFill'), pct = document.getElementById('splashPct');
+  if (!sp || !fill) return;
+  const clock = Math.min(100, ((performance.now() - SPLASH_FROM) / SPLASH_MIN_MS) * 100);
+  const v = Math.min(SPL.real, clock);
+  fill.style.width = `${v}%`;
+  if (pct) pct.textContent = `${Math.floor(v)}%`;
+  if (!sp.dataset.closing) requestAnimationFrame(splashTick);
+}
 {
   const v = document.getElementById('splashVer');
   if (v) v.textContent = `버전 ${APP_VERSION} · ${APP_DATE}`;
   const sp = document.getElementById('splash');
   if (sp) sp.addEventListener('click', () => hideSplash(true));
+  requestAnimationFrame(splashTick);
 }
 function hideSplash(now) {
   const sp = document.getElementById('splash');
   if (!sp || sp.dataset.closing) return;
+  splashProgress(100);
   const wait = now ? 0 : Math.max(0, SPLASH_MIN_MS - (performance.now() - SPLASH_FROM));
   setTimeout(() => {
     if (sp.dataset.closing) return;
@@ -2925,12 +2940,15 @@ async function boot() {
     return;
   }
   db.persist();
+  splashProgress(15);
   S.settings = { ...S.settings, ...((await db.kvGet('settings', {})) || {}) };
   S.lastSetup = await db.kvGet('lastSetup', null);
   await loadTodos().catch(() => {});
   S.shared = new Set((await db.kvGet('inPhotos', [])) || []);
   S.pc = new Set((await db.kvGet('toPC', [])) || []);
+  splashProgress(35);
   setItems(await db.all('items'));
+  splashProgress(60);
   // a photo whose location step was interrupted is kept as a "위치 없음" photo
   const drafts = S.items.filter((i) => i.draft);
   if (drafts.length) await putRecords(drafts.map((d) => ({ ...d, draft: false })));
@@ -2944,9 +2962,11 @@ async function boot() {
     if (repaired) await db.kvSet('zipRepair', { at: Date.now(), ...repaired });
   }
   if (!(window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function')) sensors.start();
+  splashProgress(75);
   const pkg = await db.kvGet('pkg');
   if (!pkg) { showWelcome(); hideSplash(); return; }
   applyPkg(pkg);
+  splashProgress(90);
   startApp();
   hideSplash();
   if (repaired) repairNotice(repaired);
