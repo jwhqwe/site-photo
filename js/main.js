@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.12.3';
+const APP_VERSION = '1.13.0';
 const APP_DATE = '2026-11-03';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -896,9 +896,10 @@ async function markPC(ids) {
   await db.kvSet('inPhotos', [...S.shared]).catch(() => {});
   renderCurrent();
 }
-function sendToPC(day) {
-  const lists = { day: unsentPC(day), all: unsentPC(null) };
-  let range = 'day', fmt = S.settings.pcFormat === 'zip' ? 'zip' : 'files', ready = null, run = 0;
+// one dialog for sending a set of photos: as photos or as one ZIP, prepared like a share, then the share sheet
+function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onSent, sentText }) {
+  let range = ranges[0].key, fmt = S.settings[fmtKey] === 'zip' ? 'zip' : 'files', ready = null, run = 0;
+  const listOf = () => ranges.find((r) => r.key === range).list;
   return openDialog((box, close) => {
     const info = el('p', { class: 'pre' }, '');
     const go = el('button', { class: 'btn primary', disabled: true }, '보내기');
@@ -907,7 +908,7 @@ function sendToPC(day) {
       return el('div', { class: 'seg' }, ...bs);
     };
     const prep = async () => {
-      const my = ++run, list = lists[range];
+      const my = ++run, list = listOf();
       go.disabled = true;
       ready = null;
       if (!list.length) { info.textContent = '보낼 사진이 없어요.'; return; }
@@ -921,15 +922,19 @@ function sendToPC(day) {
       if (my !== run) return;
       let files = out;
       if (fmt === 'zip') {
-        const rows = [CSV_HEAD], fileOf = (id) => names.get(id) || '';
-        for (const x of out) rows.push(csvRow(S.byId.get(x.id), x.name, fileOf));
-        const zip = await makeZip([...out.map((x) => ({ name: (multi ? yymmdd(x.day) + '/' : '') + x.name, blob: x.blob, date: new Date(x.ts) })), { name: '사진목록.csv', text: csv(rows) }]);
+        const entries = out.map((x) => ({ name: (multi ? yymmdd(x.day) + '/' : '') + x.name, blob: x.blob, date: new Date(x.ts) }));
+        if (csvList) {
+          const rows = [CSV_HEAD], fileOf = (id) => names.get(id) || '';
+          for (const x of out) rows.push(csvRow(S.byId.get(x.id), x.name, fileOf));
+          entries.push({ name: '사진목록.csv', text: csv(rows) });
+        }
+        const zip = await makeZip(entries);
         if (my !== run) return;
-        files = [{ blob: zip, name: `PC_${yymmdd(today())}_${timeOf(Date.now()).replace(':', '')}.zip`, mime: 'application/zip', ts: Date.now() }];
+        files = [{ blob: zip, name: `${zipBase}_${yymmdd(list[0].day)}_${timeOf(Date.now()).replace(':', '')}.zip`, mime: 'application/zip', ts: Date.now() }];
       }
       ready = { files, ids: out.map((x) => x.id) };
       const size = files.reduce((t, x) => t + x.blob.size, 0);
-      info.textContent = `${out.length}장 · ${fmtBytes(size)} 준비됐어요.\n"보내기" → LocalSend(회사 PC)나 회사 메신저를 고르세요.`;
+      info.textContent = `${out.length}장 · ${fmtBytes(size)} 준비됐어요.\n${hint}`;
       go.disabled = false;
     };
     go.onclick = () => {
@@ -937,18 +942,39 @@ function sendToPC(day) {
       const r0 = ready;
       shareFiles(r0.files).then(async (r) => {
         if (r === 'unsupported' && r0.files.length === 1) r = await shareOrDownload(r0.files[0].blob, r0.files[0].name, r0.files[0].ts);
-        if (r === 'shared' || r === 'downloaded') { await markPC(r0.ids); toast(`PC로 ${r0.ids.length}장 보냈어요`); close(); }
+        if (r === 'shared' || r === 'downloaded') { await onSent(r0.ids); toast(sentText(r0.ids.length)); close(); }
         else if (r === 'unsupported') toast('여기서는 여러 장 공유가 안 돼요. ZIP 하나로 보내 주세요', 3000);
       });
     };
-    box.append(el('h3', {}, 'PC로 보내기'),
-      seg([[`이날 ${lists.day.length}장`, 'day'], [`안 보낸 것 전부 ${lists.all.length}장`, 'all']], () => range, (v) => { range = v; }),
-      seg([['사진 그대로', 'files'], ['ZIP 하나로', 'zip']], () => fmt, (v) => { fmt = v; S.settings.pcFormat = v; saveSettings(); }),
+    box.append(el('h3', {}, title),
+      ranges.length > 1 ? seg(ranges.map((r) => [r.label, r.key]), () => range, (v) => { range = v; }) : el('p', { class: 'muted' }, ranges[0].label),
+      seg([['사진 그대로', 'files'], ['ZIP 하나로', 'zip']], () => fmt, (v) => { fmt = v; S.settings[fmtKey] = v; saveSettings(); }),
       info,
-      el('p', { class: 'muted' }, 'PC에서 한글 이름이 깨지거나 메신저가 화질을 줄이면 "ZIP 하나로"로 보내세요. 압축을 풀면 이름이 그대로예요. LocalSend는 PC에서 "빠른 저장"을 켜 두면 수락 없이 바로 저장돼요.'),
+      el('p', { class: 'muted' }, 'PC에서 한글 이름이 깨지거나 메신저가 화질을 줄이면 "ZIP 하나로"로 보내세요. 압축을 풀면 이름이 그대로예요.'),
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => { run++; close(); } }, '닫기'), go));
     prep();
   }, { dismiss: false });
+}
+function sendToPC(day) {
+  const d = unsentPC(day), all = unsentPC(null);
+  return sendDialog({
+    title: 'PC로 보내기', zipBase: 'PC', fmtKey: 'pcFormat', csvList: true,
+    ranges: [{ key: 'day', label: `이날 ${d.length}장`, list: d }, { key: 'all', label: `안 보낸 것 전부 ${all.length}장`, list: all }],
+    hint: '"보내기" → LocalSend(회사 PC)나 회사 메신저를 고르세요. LocalSend는 PC에서 "빠른 저장"을 켜 두면 바로 저장돼요.',
+    onSent: markPC, sentText: (n) => `PC로 ${n}장 보냈어요`,
+  });
+}
+// the day's TBM photos together, in trade order (건축, 건축_2, 안전 …)
+function sendTbm(day) {
+  const labs = tbmLabels(), rank = (it) => { const k = labs.indexOf(tbmOf(it)); return k < 0 ? labs.length : k; };
+  const list = vis().filter((i) => i.tbm && i.day === day && !i.draft).sort((a, b) => rank(a) - rank(b) || a.ts - b.ts);
+  const count = labs.map((l) => `${l} ${list.filter((i) => tbmOf(i) === l).length}`).join(' · ');
+  return sendDialog({
+    title: `TBM 보내기 · ${dayLabel(day)}`, zipBase: 'TBM', fmtKey: 'tbmFormat',
+    ranges: [{ key: 'tbm', label: `TBM ${list.length}장 (${count})`, list }],
+    hint: '"보내기" → 메신저나 LocalSend를 고르세요.',
+    onSent: markShared, sentText: (n) => `TBM ${n}장 보냈어요`,
+  });
 }
 async function markShared(ids) {
   for (const id of ids) S.shared.add(id);
@@ -1710,7 +1736,8 @@ function renderDays() {
   card.replaceChildren(el('h3', {}, el('button', {
     class: 'fold', 'aria-expanded': String(open), 'aria-label': open ? 'TBM 접기' : 'TBM 펼치기',
     onclick: () => { S.settings.tbmFold = open; saveSettings(); renderCurrent(); },
-  }, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요'), chev)), row);
+  }, 'TBM', el('small', { class: missing ? 'warn' : 'muted' }, tbm.length ? `${tbm.length}장` : '아직 없어요'), chev),
+  tbm.length ? el('button', { class: 'btn small tbm-send', onclick: () => sendTbm(day) }, '보내기') : null), row);
 
   renderSeriesCard(day);
   renderPCBar(day);
@@ -1888,10 +1915,10 @@ async function openCalendar() {
 async function importMedia(day, tbm, target = null) {
   const files = await pickFiles({ accept: tbm ? 'image/*' : 'image/*,video/*', multiple: true });
   if (!files.length) return;
-  let tbmLabel = tbmLabels()[0];
+  let labsOf = files.map(() => tbmLabels()[0]);
   if (tbm && tbmLabels().length > 1) {
-    tbmLabel = await choose(`TBM 사진 ${files.length}장 · 어느 공종인가요?`, tbmLabels().map((l) => ({ label: l, value: l })));
-    if (!tbmLabel) return;
+    labsOf = await pickTbmLabels(files);
+    if (!labsOf) return;
   }
   const b = busy('사진 넣는 중…');
   let k = 0;
@@ -1906,7 +1933,7 @@ async function importMedia(day, tbm, target = null) {
         : shot && dayOf(shot) === day ? shot : f.lastModified && dayOf(f.lastModified) === day ? f.lastModified : dayStart(day) + 8 * 3600e3 + k * 1000;
       const blob = isVideo ? f : await outBlob({ kind: 'photo', ts, w: t.w, h: t.h }, f);
       const media = { blob, kind: isVideo ? 'video' : 'photo', mime: f.type || 'image/jpeg', lens: 'album', w: t.w, h: t.h };
-      await putItem(newRecord(media, ts, target ? targetFields(target) : tbm ? { tbm: true, tbmLabel, floor: null } : {}), blob, t.thumb);
+      await putItem(newRecord(media, ts, target ? targetFields(target) : tbm ? { tbm: true, tbmLabel: labsOf[k], floor: null } : {}), blob, t.thumb);
       k++;
       b.set(`사진 넣는 중… ${k}/${files.length}`);
     }
@@ -1914,11 +1941,33 @@ async function importMedia(day, tbm, target = null) {
     alertBox('일부만 넣었어요', `${k}개를 넣었어요. ${(e && e.message) || ''}`);
   } finally { b.done(); }
   if (k) S.names = null;
-  if (k) toast(target ? `${target.mark}에 ${k}개를 올렸어요` : tbm ? `TBM ${tbmLabel} 사진 ${k}장을 넣었어요` : `${k}개를 넣었어요. 위치는 사진을 눌러 붙이세요.`, 2600);
+  if (k) toast(target ? `${target.mark}에 ${k}개를 올렸어요` : tbm ? `TBM 사진 ${k}장을 넣었어요 (${tbmLabels().map((l) => `${l} ${labsOf.slice(0, k).filter((x) => x === l).length}`).join(' · ')})` : `${k}개를 넣었어요. 위치는 사진을 눌러 붙이세요.`, 2600);
   renderCurrent();
   if (target && S.tab === 'plan' && S.planTap) onPlanTap(S.planTap);
 }
 
+// TBM photos from the album: a trade for each photo. Picked in order (건축 2, 안전 2, 전기 2) they split evenly by
+// default; otherwise tap the trade under each picture.
+function pickTbmLabels(files) {
+  const labs = tbmLabels(), urls = files.map((f) => URL.createObjectURL(f));
+  const n = Math.ceil(files.length / labs.length);
+  const even = (i) => labs[Math.min(labs.length - 1, Math.floor(i / n))];
+  const cur = files.map((_, i) => (files.length % labs.length === 0 ? even(i) : labs[0]));
+  return openDialog((box, close) => {
+    const rows = files.map((f, i) => {
+      const keys = labs.map((l) => el('button', { onclick: () => { cur[i] = l; paint(); } }, l));
+      return { keys, row: el('div', { class: 'tbm-pick-row' }, el('img', { src: urls[i], alt: `${i + 1}번째 사진` }), el('div', { class: 'seg' }, ...keys)) };
+    });
+    const paint = () => rows.forEach((r, i) => r.keys.forEach((k, j) => k.setAttribute('aria-pressed', String(cur[i] === labs[j]))));
+    paint();
+    box.append(el('h3', {}, `TBM 사진 ${files.length}장 · 공종 고르기`),
+      el('div', { class: 'btns' },
+        files.length > 1 ? el('button', { class: 'btn small', onclick: () => { files.forEach((_, i) => { cur[i] = even(i); }); paint(); } }, `${n}장씩 차례로`) : null,
+        ...labs.map((l) => el('button', { class: 'btn small', onclick: () => { cur.fill(l); paint(); } }, `모두 ${l}`))),
+      el('div', { class: 'tbm-pick-list' }, ...rows.map((r) => r.row)),
+      el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close(null) }, '취소'), el('button', { class: 'btn primary', onclick: () => close(cur.slice()) }, '넣기')));
+  }, { dismiss: false }).then((r) => { urls.forEach((u) => URL.revokeObjectURL(u)); return r || null; });
+}
 // photos straight onto a member chosen on the drawing tab: the location is the member, no location step
 function targetOf(fl, m) {
   const c = centroid(m.pts).map(r2), room = PV.roomAt(c);

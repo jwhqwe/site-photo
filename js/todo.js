@@ -56,7 +56,7 @@ export function renderTodos() {
     banner.replaceChildren(el('span', {}, `지난날 못 끝낸 일 ${late.length}개`),
       el('button', { class: 'btn small', onclick: async () => { carry(late, today()); await save(); renderTodos(); toast(`${late.length}개를 오늘로 넘겼어요`); } }, '오늘로 넘기기'));
   }
-  $('#tList').replaceChildren(...items.map((t) => el('div', { class: 'todo ' + t.state },
+  $('#tList').replaceChildren(...items.map((t) => el('div', { class: 'todo ' + t.state, 'data-id': t.id },
     el('button', { class: 'todo-dot', 'aria-label': `${t.text}: ${SAY[t.state]}`, disabled: t.state === 'moved', onclick: () => cycle(t) }, el('i', {}, MARK[t.state])),
     el('button', { class: 'todo-txt', onclick: () => edit(t) },
       el('span', {}, t.text),
@@ -65,6 +65,7 @@ export function renderTodos() {
       null),
     t.state === 'done' ? againKey(t) : null)));
   $('#tEmpty').hidden = items.length > 0;
+  $('#tTools').hidden = items.filter((t) => t.state !== 'moved').length < 2;
 }
 
 // done today, to do again tomorrow: one tap copies it to the next day
@@ -112,7 +113,71 @@ async function add(text) {
   renderTodos();
 }
 
+// order: press and hold a to-do, then drag it up or down. "정리" puts open ones first, then done, failed, carried.
+const RANK = { todo: 0, done: 1, fail: 2, moved: 3 };
+async function setOrder(list) {
+  list.forEach((t, i) => { t.order = i + 1; });
+  renderTodos();
+  await save();
+}
+function bindReorder() {
+  const box = $('#tList');
+  let P = null, skipClick = false;
+  const rows = () => [...box.querySelectorAll('.todo')];
+  const clear = () => { rows().forEach((r) => { r.classList.remove('lift', 'drop-before'); r.style.transform = ''; }); box.classList.remove('drop-end'); };
+  box.addEventListener('pointerdown', (e) => {
+    const row = e.target.closest('.todo');
+    if (!row || e.target.closest('.todo-dot, .todo-again') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    P = { row, id: row.dataset.id, x0: e.clientX, y0: e.clientY, pid: e.pointerId, on: false, idx: null };
+    P.timer = setTimeout(() => {
+      if (!P) return;
+      P.on = true;
+      P.row.classList.add('lift');
+      try { box.setPointerCapture(P.pid); } catch (err) { /* fine without */ }
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 380);
+  });
+  box.addEventListener('pointermove', (e) => {
+    if (!P) return;
+    const dy = e.clientY - P.y0;
+    if (!P.on) { if (Math.hypot(e.clientX - P.x0, dy) > 8) { clearTimeout(P.timer); P = null; } return; }
+    P.row.style.transform = `translateY(${dy}px)`;
+    const others = rows().filter((r) => r !== P.row);
+    let idx = others.length;
+    for (let i = 0; i < others.length; i++) { const b = others[i].getBoundingClientRect(); if (e.clientY < b.top + b.height / 2) { idx = i; break; } }
+    others.forEach((r, i) => r.classList.toggle('drop-before', i === idx));
+    box.classList.toggle('drop-end', idx === others.length);
+    P.idx = idx;
+  });
+  const end = async () => {
+    if (!P) return;
+    clearTimeout(P.timer);
+    const p = P;
+    P = null;
+    if (!p.on) return;
+    skipClick = true;
+    setTimeout(() => { skipClick = false; }, 0);
+    clear();
+    if (p.idx == null) return;
+    const list = ofDay(T.day), t = list.find((x) => x.id === p.id);
+    if (!t) return;
+    const rest = list.filter((x) => x !== t);
+    rest.splice(p.idx, 0, t);
+    await setOrder(rest);
+  };
+  box.addEventListener('pointerup', end);
+  box.addEventListener('pointercancel', end);
+  box.addEventListener('touchmove', (e) => { if (P && P.on && e.cancelable) e.preventDefault(); }, { passive: false });
+  box.addEventListener('click', (e) => { if (skipClick) { e.stopPropagation(); e.preventDefault(); } }, true);
+}
 export function bindTodos() {
+  bindReorder();
+  $('#tSort').onclick = async () => {
+    const list = ofDay(T.day);
+    if (list.length < 2) return;
+    await setOrder(list.map((t, i) => [t, i]).sort((a, b) => (RANK[a[0].state] ?? 0) - (RANK[b[0].state] ?? 0) || a[1] - b[1]).map((x) => x[0]));
+    toast('할 일을 위로, 끝낸 일을 아래로 정리했어요');
+  };
   const go = (d) => { T.day = d; renderTodos(); };
   $('#tPrev').onclick = () => go(addDays(T.day, -1));
   $('#tNext').onclick = () => go(addDays(T.day, 1));
