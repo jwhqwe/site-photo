@@ -65,7 +65,7 @@ export function renderTodos() {
       null),
     t.state === 'done' ? againKey(t) : null)));
   $('#tEmpty').hidden = items.length > 0;
-  $('#tTools').hidden = items.filter((t) => t.state !== 'moved').length < 2;
+  $('#tSort').hidden = items.filter((t) => t.state !== 'moved').length < 2;
 }
 
 // done today, to do again tomorrow: one tap copies it to the next day

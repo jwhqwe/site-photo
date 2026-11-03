@@ -18,7 +18,7 @@
 <div id="splash" class="splash" role="status" aria-live="polite">
   <img src="icons/icon-192.png" alt="" width="92" height="92">
   <h1>현장 사진</h1>
-  <p id="splashVer">버전 1.13.0 · 2026-11-03</p>
+  <p id="splashVer">버전 1.13.1 · 2026-11-03</p>
   <div class="splash-bar"><span id="splashFill"></span></div>
   <b id="splashPct" class="splash-pct">0%</b>
   <small class="splash-tip">화면을 누르면 바로 시작해요</small>
@@ -103,12 +103,12 @@
         <button id="tTitle" class="bar-title"></button>
         <button id="tNext" class="icon-btn" aria-label="다음 날">›</button>
         <span class="spacer"></span>
+        <button id="tSort" class="icon-btn t-sort" aria-label="순서 정리: 할 일을 위로, 끝낸 일을 아래로" hidden>⇅</button>
         <span id="tCount" class="t-count"></span>
       </header>
       <div class="scroll">
         <form id="tAdd" class="todo-add"><input id="tInput" placeholder="할 일 추가" enterkeyhint="done" autocomplete="off" aria-label="할 일 추가"><button class="btn primary" type="submit">추가</button></form>
         <div id="tCarry" class="banner" hidden></div>
-        <div class="todo-tools" id="tTools" hidden><button id="tSort" class="btn small">순서 정리</button></div>
         <div id="tList" class="todo-list"></div>
         <p id="tEmpty" class="empty" hidden>이날 할 일이 없어요.</p>
       </div>

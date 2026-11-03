@@ -11,7 +11,7 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.1';
 const APP_DATE = '2026-11-03';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -928,7 +928,7 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
           for (const x of out) rows.push(csvRow(S.byId.get(x.id), x.name, fileOf));
           entries.push({ name: '사진목록.csv', text: csv(rows) });
         }
-        const zip = await makeZip(entries);
+        const zip = await makeZip(entries, null, { windows: true });
         if (my !== run) return;
         files = [{ blob: zip, name: `${zipBase}_${yymmdd(list[0].day)}_${timeOf(Date.now()).replace(':', '')}.zip`, mime: 'application/zip', ts: Date.now() }];
       }
@@ -2120,12 +2120,11 @@ function updateBadge() {
 }
 
 // ================================================================ export / backup
-const CSV_HEAD = ['파일명', '날짜', '시간', '층', '실', '실 코드', '그리드', '부재', '방향', '방향 기준', '기울기(°)', '렌즈', '구분', '이슈', '조치일', '짝 사진', '메모'];
+const CSV_HEAD = ['파일명', '날짜', '시간', '층', '실', '실 코드', '그리드', '부재', '구분', '이슈', '조치일', '짝 사진', '메모'];
 function csvRow(it, fn, fileOf) {
   return [
     fn, it.day, timeOf(it.ts), it.tbm || it.doc ? '' : floorLabel(it.floor), it.room ? it.room.name : '', it.room ? it.room.code : '',
-    it.grid || '', it.tbm || it.doc ? '' : (it.noMember ? '부재 없음' : memberText(it)), it.fan ? bearingText(it.fan.dir) : '',
-    it.fan ? SRC[it.fan.src] || '' : '', it.pitch == null ? '' : it.pitch, LENS[it.lens] || it.lens || '',
+    it.grid || '', it.tbm || it.doc ? '' : (it.noMember ? '부재 없음' : memberText(it)),
     it.tbm ? 'TBM' : it.doc ? '문서' : it.fixOf ? '조치 후' : '', it.issue ? (it.issue.status === 'open' ? '미조치' : '조치 완료') : '',
     (it.issue && it.issue.fixedDay) || '',
     it.issue && it.issue.fixId ? '조치 후: ' + fileOf(it.issue.fixId) : it.fixOf ? '조치 전: ' + fileOf(it.fixOf) : '',
@@ -2150,9 +2149,9 @@ async function exportItems(list) {
       rows.push(csvRow(it, fn, fileOf));
     }
     entries.push({ name: '사진목록.csv', text: csv(rows) });
-    const zip = await makeZip(entries, (i, n) => b.set(`묶는 중… ${i}/${n}`));
+    const zip = await makeZip(entries, (i, n) => b.set(`묶는 중… ${i}/${n}`), { windows: true });
     b.done();
-    const zipName = `현장사진_${yymmdd(days[0])}${multi ? '-' + yymmdd(days[days.length - 1]) : ''}.zip`;
+    const zipName = `PHOTO_${yymmdd(days[0])}${multi ? '-' + yymmdd(days[days.length - 1]) : ''}.zip`; // ASCII: iPhone splits Korean file names on the way to Windows
     const r = await offerFile(zip, zipName, 'ZIP 준비 완료', `${entries.length - 1}개 · ${fmtBytes(zip.size)}\n"파일에 저장"을 고르면 폰에 저장돼요. 사진마다 찍은 날짜·시간이 들어 있어요.`);
     if (r === 'shared' || r === 'downloaded') markShared(list.map((i) => i.id));
   } catch (e) {

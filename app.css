@@ -338,9 +338,10 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 /* 할 일 */
 #todoBadge { color: var(--ink-2); }
 .t-count { font-size: 15px; font-weight: 800; }
-.todo-tools { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: -6px 0 8px; }
-.todo-tools[hidden] { display: none; }
-.todo-tools small { font-size: 12.5px; color: var(--ink-2); font-weight: 600; }
+#scr-todo .bar { gap: 6px; }
+#scr-todo .bar-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t-sort { width: 36px; min-width: 36px; height: 36px; min-height: 36px; font-size: 18px; padding: 0; }
+.t-sort[hidden] { display: none; }
 .todo-list { border-top: 2px solid var(--line); }
 .todo-list:empty { border-top: 0; }
 .todo { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; column-gap: 6px; border-bottom: 1px solid var(--soft); min-height: 54px; }

@@ -1,5 +1,6 @@
 // Small helpers: dates, ids, file names, CSV, ZIP (store only), images.
 
+import { cp949 } from './cp949.js';
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -123,34 +124,47 @@ function dosTime(d) {
   return [time, date];
 }
 // entries: [{name, blob | text, date?}] -> Blob. Each file is read once for its CRC; the zip itself is built from Blob parts.
-export async function makeZip(entries, onProgress) {
+// windows: names for a Korean Windows PC. The name field holds CP949 (what Windows' own unzip and older tools read) and
+// the Info-ZIP Unicode path field (0x7075) holds the exact UTF-8 name for tools that know it (7-Zip, Bandizip, this
+// app). Without it the names are UTF-8 with the UTF-8 flag (backups read back by the app).
+export async function makeZip(entries, onProgress, { windows = false } = {}) {
   const enc = new TextEncoder();
   const parts = [], central = [];
   let offset = 0, i = 0;
   for (const e of entries) {
-    if (e.name) e.name = e.name.normalize('NFC'); // names inside the ZIP stay whole on Windows
+    if (e.name) e.name = e.name.normalize('NFC'); // composed Hangul: whole letters everywhere
     const data = e.blob || new Blob([e.text || ''], { type: 'text/plain' });
     const buf = new Uint8Array(await data.arrayBuffer());
     const crc = crc32(buf);
-    const name = enc.encode(e.name);
+    const utf8 = enc.encode(e.name), ascii = utf8.every((x) => x < 0x80);
+    let name = utf8, flag = 0x0800, extra = new Uint8Array(0);
+    if (windows && !ascii) {
+      name = cp949(e.name);
+      flag = 0;
+      extra = new Uint8Array(9 + utf8.length);
+      const x = new DataView(extra.buffer);
+      x.setUint16(0, 0x7075, true); x.setUint16(2, 5 + utf8.length, true); x.setUint8(4, 1); x.setUint32(5, crc32(name), true);
+      extra.set(utf8, 9);
+    }
     const [t, d] = dosTime(e.date || new Date());
     const lh = new DataView(new ArrayBuffer(30));
-    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, flag, true); lh.setUint16(8, 0, true);
     lh.setUint16(10, t, true); lh.setUint16(12, d, true); lh.setUint32(14, crc, true);
-    lh.setUint32(18, buf.length, true); lh.setUint32(22, buf.length, true); lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
-    parts.push(lh.buffer, name, data);
+    lh.setUint32(18, buf.length, true); lh.setUint32(22, buf.length, true); lh.setUint16(26, name.length, true); lh.setUint16(28, extra.length, true);
+    parts.push(lh.buffer, name, extra, data);
     const ch = new DataView(new ArrayBuffer(46));
-    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, flag, true);
     ch.setUint16(10, 0, true); ch.setUint16(12, t, true); ch.setUint16(14, d, true); ch.setUint32(16, crc, true);
     ch.setUint32(20, buf.length, true); ch.setUint32(24, buf.length, true); ch.setUint16(28, name.length, true);
-    ch.setUint16(30, 0, true); ch.setUint16(32, 0, true); ch.setUint16(34, 0, true); ch.setUint16(36, 0, true);
+    ch.setUint16(30, extra.length, true); ch.setUint16(32, 0, true); ch.setUint16(34, 0, true); ch.setUint16(36, 0, true);
     ch.setUint32(38, 0, true); ch.setUint32(42, offset, true);
-    central.push(ch.buffer, name);
-    offset += 30 + name.length + buf.length;
+    central.push(ch.buffer, name, extra);
+    offset += 30 + name.length + extra.length + buf.length;
     if (onProgress) onProgress(++i, entries.length);
   }
   let csize = 0;
   for (const c of central) csize += c.byteLength;
+  // (a Uint8Array counts by byteLength too)
   const end = new DataView(new ArrayBuffer(22));
   end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
   end.setUint32(12, csize, true); end.setUint32(16, offset, true);
@@ -171,7 +185,13 @@ export async function readZip(blob) {
     const method = cd.getUint16(p + 10, true), size = cd.getUint32(p + 20, true);
     const nlen = cd.getUint16(p + 28, true), xlen = cd.getUint16(p + 30, true), clen = cd.getUint16(p + 32, true);
     const lho = cd.getUint32(p + 42, true);
-    const name = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nlen));
+    let name = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nlen));
+    // a Unicode path field (0x7075) carries the exact name
+    for (let q = p + 46 + nlen; q + 4 <= p + 46 + nlen + xlen;) {
+      const id = cd.getUint16(q, true), sz = cd.getUint16(q + 2, true);
+      if (id === 0x7075 && sz > 5) name = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + q + 9, sz - 5));
+      q += 4 + sz;
+    }
     if (method !== 0) throw new Error('zip: 압축된 항목은 읽을 수 없어요 (' + name + ')');
     const lh = new DataView(await blob.slice(lho, lho + 30).arrayBuffer());
     const start = lho + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
