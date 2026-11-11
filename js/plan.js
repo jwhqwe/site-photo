@@ -5,7 +5,7 @@ import { el } from './util.js';
 const NS = 'http://www.w3.org/2000/svg';
 export function svg(tag, attrs, parent) {
   const e = document.createElementNS(NS, tag);
-  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  for (const k in attrs) if (attrs[k] != null) e.setAttribute(k, attrs[k]);
   if (parent) parent.appendChild(e);
   return e;
 }
@@ -77,13 +77,14 @@ export class PlanView {
     this.onTap = null;
     this.drawStatic = null;
     this.drawDynamic = null;
-    // press hooks (a screen sets them): onPress(p) -> {mode:'grab', offset} | {mode:'hold'} | null,
-    // onHold(p) -> true to start dragging, onDragStart(), onDrag(p), onDragEnd(p)
+    // press hooks (a screen sets them): onPress(p) -> {mode:'grab', offset} | {mode:'hold'} | {mode:'draw'} | null,
+    // onHold(p) -> true to start dragging, onDragStart(), onDrag(p), onDragEnd(p); onBox(p0, p, done) for 'draw'
     this.onPress = null;
     this.onHold = null;
     this.onDragStart = null;
     this.onDrag = null;
     this.onDragEnd = null;
+    this.onBox = null;
     this.hi = { doc: null, page: null, pageKey: null, task: null, timer: 0, gen: 0, front: null };
     this.rowCache = new Map();
     this.bindGestures();
@@ -162,6 +163,12 @@ export class PlanView {
     v.ty = r.height / 2 - (p[1] - this.P0Y) * this.K * v.s;
     this.apply();
   }
+  // a part of the drawing (plan box) in the middle, taking about 60% of the stage, never closer than focus() goes
+  focusOn(box) {
+    const r = this.stage.getBoundingClientRect();
+    const w = Math.max(box[2] - box[0], 1) * this.K, h = Math.max(box[3] - box[1], 1) * this.K;
+    this.focus([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2], Math.min(this.view.fit * 4, (r.width * 0.6) / w, (r.height * 0.6) / h));
+  }
   getView() { return { ...this.view }; }
   setView(v) { Object.assign(this.view, v); this.apply(); }
   toPlan(clientX, clientY) {
@@ -192,12 +199,13 @@ export class PlanView {
     };
     st.addEventListener('pointerdown', (e) => {
       if (!this.floor) return;
-      st.setPointerCapture(e.pointerId);
+      try { st.setPointerCapture(e.pointerId); } catch (err) { /* fine without */ }
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (ptrs.size === 1) {
         g = { type: 'one', x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, t0: performance.now(), tx0: this.view.tx, ty0: this.view.ty, moved: false, drag: null, grab: null, hold: 0 };
         const r = this.onPress ? this.onPress(this.toPlan(e.clientX, e.clientY), e) : null;
         if (r && r.mode === 'grab') g.grab = { off: r.offset || [0, 0] };
+        else if (r && r.mode === 'draw') g.box = { p0: this.toPlan(e.clientX, e.clientY), on: false };
         else if (r && r.mode === 'hold') {
           const mine = g;
           g.hold = setTimeout(() => {
@@ -211,6 +219,7 @@ export class PlanView {
       } else if (ptrs.size === 2) {
         stopHold();
         endDrag();
+        if (g && g.box && g.box.on && this.onBox) this.onBox(null, null, true); // a second finger: no box, move and zoom
         const [a, b] = [...ptrs.values()];
         g = { type: 'two', d0: Math.hypot(a.x - b.x, a.y - b.y), s0: this.view.s, mx0: (a.x + b.x) / 2, my0: (a.y + b.y) / 2, tx0: this.view.tx, ty0: this.view.ty };
       }
@@ -222,10 +231,17 @@ export class PlanView {
       if (g.type === 'one' && ptrs.size === 1) {
         g.x = e.clientX; g.y = e.clientY;
         if (g.drag) { dragTo(e.clientX, e.clientY); return; }
+        if (g.box && g.box.on) { if (this.onBox) this.onBox(g.box.p0, this.toPlan(e.clientX, e.clientY), false); return; }
         const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
         if (!g.moved && Math.hypot(dx, dy) > 8) {
           g.moved = true;
           stopHold();
+          if (g.box) {
+            // drawing a box: the finger draws, the drawing stays
+            g.box.on = true;
+            if (this.onBox) this.onBox(g.box.p0, this.toPlan(e.clientX, e.clientY), false);
+            return;
+          }
           if (g.grab) {
             // the finger started on the pin: move the pin, not the drawing
             g.drag = { off: g.grab.off, last: null };
@@ -250,6 +266,9 @@ export class PlanView {
       stopHold();
       if (g && g.drag) {
         endDrag();
+        g = null;
+      } else if (g && g.box && g.box.on) {
+        if (this.onBox) this.onBox(e.type === 'pointercancel' ? null : g.box.p0, this.toPlan(e.clientX, e.clientY), true);
         g = null;
       } else if (g && g.type === 'one' && !g.moved && ptrs.size === 0 && performance.now() - g.t0 < 600 && this.onTap) {
         this.onTap(this.toPlan(e.clientX, e.clientY), e);

@@ -275,6 +275,9 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .plan-ov .m-ghost { fill: rgba(245,196,0,.4); stroke: var(--ink); stroke-width: 1.1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .plan-ov .fan { fill: rgba(46,107,230,.16); stroke: var(--blue); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .plan-ov .fan.ghost { fill: rgba(46,107,230,.07); stroke-dasharray: 5 4; }
+.plan-ov .area { fill: rgba(255,90,31,.2); stroke: var(--accent); }
+.plan-ov .area.ghost { fill: rgba(255,90,31,.08); }
+.plan-ov .sight { stroke: var(--blue); fill: none; }
 .plan-ov .pin { fill: var(--pin); stroke: #fff; }
 .plan-ov .pin.ghost { fill: rgba(17,17,17,.4); }
 .plan-ov .pin.moving { fill: var(--accent); stroke: var(--ink); }
@@ -338,10 +341,18 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 /* 할 일 */
 #todoBadge { color: var(--ink-2); }
 .t-count { font-size: 15px; font-weight: 800; }
-#scr-todo .bar { gap: 6px; }
-#scr-todo .bar-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#scr-todo .bar { gap: 4px; }
+#scr-todo .bar-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 19px; padding: 6px 2px; }
+#scr-todo .bar > .icon-btn:not(.t-sort) { min-width: 38px; }
+.t-today { font-size: 13px; font-weight: 800; color: var(--accent); margin-left: 5px; }
 .t-sort { width: 36px; min-width: 36px; height: 36px; min-height: 36px; font-size: 18px; padding: 0; }
 .t-sort[hidden] { display: none; }
+.rt-mark { color: var(--ink-2); font-weight: 800; margin-right: 6px; }
+.rt-list { display: flex; flex-direction: column; border-top: 2px solid var(--line); margin: 6px 0 10px; }
+.rt-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 0; border-bottom: 1px solid var(--soft); background: none; padding: 12px 4px; text-align: left; font-size: 16px; font-weight: 700; color: var(--ink); }
+.rt-row small { font-size: 13px; color: var(--ink-2); font-weight: 700; flex: none; }
+.rt-days { display: grid; width: 100%; margin: 12px 0 8px; }
+.rt-days button { min-width: 0; padding: 0; }
 .todo-list { border-top: 2px solid var(--line); }
 .todo-list:empty { border-top: 0; }
 .todo { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; column-gap: 6px; border-bottom: 1px solid var(--soft); min-height: 54px; }

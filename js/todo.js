@@ -6,11 +6,43 @@ import { openDialog } from './ui.js';
 import * as db from './db.js';
 
 const T = { list: [], day: today() };
+// 루틴: tasks that come back on chosen weekdays (매일, 평일, 월·수·금 …). A day's copies are made when that day is opened,
+// today or later only (past days stay as they were), at the top of the list; they are not carried over (they come back).
+const R = { list: [] }; // {id, text, days: [0–6, 0 = 일], from: day, skip: {day: true}}
+const WD = ['일', '월', '화', '수', '목', '금', '토'];
+const weekday = (d) => new Date(`${d}T00:00:00`).getDay();
+function daysText(days) {
+  const s = [...days].sort((a, b) => a - b).join('');
+  return s === '0123456' ? '매일' : s === '12345' ? '평일' : s === '06' ? '주말' : [...days].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)).map((d) => WD[d]).join('·');
+}
+async function saveRoutines() { try { await db.kvSet('routines', R.list); } catch (e) { toast('루틴을 저장하지 못했어요'); } }
+function ensureRoutines(d) {
+  if (d < today()) return false;
+  let added = false;
+  R.list.forEach((r, i) => {
+    if (d < r.from || !r.days.includes(weekday(d)) || (r.skip && r.skip[d])) return;
+    if (T.list.some((t) => t.routine === r.id && t.day === d)) return;
+    T.list.push({ id: uid('t'), day: d, text: r.text, memo: '', state: 'todo', routine: r.id, ts: Date.now(), order: -1000 + i });
+    added = true;
+  });
+  return added;
+}
+export const routinesForBackup = () => R.list;
+export async function restoreRoutines(list) {
+  const have = new Set(R.list.map((r) => r.id));
+  for (const r of list || []) if (r && r.id && !have.has(r.id)) R.list.push(r);
+  await saveRoutines();
+}
 const NEXT = { todo: 'done', done: 'fail', fail: 'todo' };
 const MARK = { todo: '', done: '✓', fail: '✕', moved: '→' };
 const SAY = { todo: '할 일', done: '했음', fail: '못 함', moved: '넘김' };
 
-export async function loadTodos() { T.list = (await db.kvGet('todos', [])) || []; updateTodoBadge(); }
+export async function loadTodos() {
+  T.list = (await db.kvGet('todos', [])) || [];
+  R.list = (await db.kvGet('routines', [])) || [];
+  if (ensureRoutines(today())) await save();
+  updateTodoBadge();
+}
 export const todosForBackup = () => T.list;
 export async function restoreTodos(list) {
   const have = new Set(T.list.map((t) => t.id));
@@ -25,7 +57,7 @@ const ofDay = (d) => T.list.filter((t) => t.day === d).sort((a, b) => (a.order |
 const nextOrder = (d) => Math.max(0, ...ofDay(d).map((t) => t.order || 0)) + 1;
 const short = (d) => { const [, m, dd] = d.split('-'); return `${+m}/${+dd}`; };
 // unfinished items left on earlier days
-const behind = () => T.list.filter((t) => t.day < today() && t.state === 'todo');
+const behind = () => T.list.filter((t) => t.day < today() && t.state === 'todo' && !t.routine);
 
 export function updateTodoBadge() {
   const b = $('#todoBadge');
@@ -45,8 +77,9 @@ function carry(list, toDay) {
 }
 
 export function renderTodos() {
+  if (ensureRoutines(T.day)) save();
   const d = T.day, items = ofDay(d), isToday = d === today();
-  $('#tTitle').textContent = dayLabel(d) + (isToday ? ' · 오늘' : '');
+  $('#tTitle').replaceChildren(`${short(d)} (${WD[weekday(d)]})`, isToday ? el('small', { class: 't-today' }, '오늘') : '');
   const real = items.filter((t) => t.state !== 'moved');
   $('#tCount').textContent = real.length ? `${real.filter((t) => t.state === 'done').length}/${real.length}` : '';
   const late = isToday ? behind() : [];
@@ -59,11 +92,11 @@ export function renderTodos() {
   $('#tList').replaceChildren(...items.map((t) => el('div', { class: 'todo ' + t.state, 'data-id': t.id },
     el('button', { class: 'todo-dot', 'aria-label': `${t.text}: ${SAY[t.state]}`, disabled: t.state === 'moved', onclick: () => cycle(t) }, el('i', {}, MARK[t.state])),
     el('button', { class: 'todo-txt', onclick: () => edit(t) },
-      el('span', {}, t.text),
+      el('span', {}, t.routine ? el('b', { class: 'rt-mark', 'aria-label': '루틴' }, '↻') : null, t.text),
       t.memo ? el('small', {}, t.memo) : null,
       t.state === 'moved' ? el('small', { class: 'todo-note' }, `${short(t.movedTo)}로 넘김`) : null,
       null),
-    t.state === 'done' ? againKey(t) : null)));
+    t.state === 'done' && !t.routine ? againKey(t) : null)));
   $('#tEmpty').hidden = items.length > 0;
   $('#tSort').hidden = items.filter((t) => t.state !== 'moved').length < 2;
 }
@@ -99,9 +132,66 @@ function edit(t) {
     const moveTo = isPast ? today() : addDays(t.day, 1);
     box.append(el('h3', {}, '할 일'), text, memo,
       el('div', { class: 'd-actions' },
-        el('button', { class: 'btn danger', onclick: act(() => { T.list = T.list.filter((x) => x !== t); }) }, '지우기'),
-        t.state === 'moved' ? null : el('button', { class: 'btn', onclick: act(() => carry([t], moveTo)) }, isPast ? '오늘로 넘기기' : '내일로 넘기기'),
+        el('button', { class: 'btn danger', onclick: act(() => {
+          T.list = T.list.filter((x) => x !== t);
+          const r = t.routine && R.list.find((x) => x.id === t.routine);
+          if (r) { r.skip = { ...(r.skip || {}), [t.day]: true }; saveRoutines(); }
+        }) }, '지우기'),
+        t.state === 'moved' || t.routine ? null : el('button', { class: 'btn', onclick: act(() => carry([t], moveTo)) }, isPast ? '오늘로 넘기기' : '내일로 넘기기'),
         el('button', { class: 'btn primary', onclick: act(() => {}) }, '저장')));
+  });
+}
+
+function routinesDialog() {
+  return openDialog((box, close) => {
+    const list = () => {
+      box.replaceChildren(el('h3', {}, '루틴'),
+        R.list.length ? el('div', { class: 'rt-list' }, ...R.list.map((r) => el('button', { class: 'rt-row', onclick: () => form(r) },
+          el('span', {}, r.text), el('small', {}, daysText(r.days)))))
+          : el('p', { class: 'muted' }, '정해진 요일마다 할 일 목록에 저절로 들어가는 일이에요. (예: TBM 사진, 작업일보)'),
+        el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), el('button', { class: 'btn primary', onclick: () => form(null) }, '+ 루틴 추가')));
+    };
+    const form = (r) => {
+      const days = new Set(r ? r.days : [1, 2, 3, 4, 5]);
+      const text = el('input', { value: r ? r.text : '', placeholder: '예: TBM 사진 정리', autocomplete: 'off' });
+      const keys = [1, 2, 3, 4, 5, 6, 0].map((d) => el('button', { 'aria-pressed': String(days.has(d)), onclick: () => { if (days.has(d)) days.delete(d); else days.add(d); paint(); } }, WD[d]));
+      const paint = () => keys.forEach((k, i) => k.setAttribute('aria-pressed', String(days.has([1, 2, 3, 4, 5, 6, 0][i]))));
+      const preset = (ds) => () => { days.clear(); ds.forEach((d) => days.add(d)); paint(); };
+      const commit = async () => {
+        const v = text.value.trim();
+        if (!v || !days.size) { toast(v ? '요일을 하나 이상 고르세요' : '할 일을 적으세요'); return; }
+        const ds = [...days].sort();
+        if (r) {
+          r.text = v;
+          r.days = ds;
+          // today's and later copies not done yet follow the change
+          T.list = T.list.filter((t) => !(t.routine === r.id && t.day >= today() && t.state === 'todo' && !ds.includes(weekday(t.day))));
+          for (const t of T.list) if (t.routine === r.id && t.day >= today() && t.state === 'todo') t.text = v;
+        } else R.list.push({ id: uid('r'), text: v, days: ds, from: today(), skip: {} });
+        await saveRoutines();
+        ensureRoutines(T.day);
+        await save();
+        renderTodos();
+        list();
+      };
+      const remove = async () => {
+        R.list = R.list.filter((x) => x !== r);
+        T.list = T.list.filter((t) => !(t.routine === r.id && t.day >= today() && t.state === 'todo'));
+        await saveRoutines();
+        await save();
+        renderTodos();
+        list();
+      };
+      box.replaceChildren(el('h3', {}, r ? '루틴 고치기' : '루틴 추가'), text,
+        el('div', { class: 'seg rt-days' }, ...keys),
+        el('div', { class: 'btns' }, el('button', { class: 'btn small', onclick: preset([0, 1, 2, 3, 4, 5, 6]) }, '매일'), el('button', { class: 'btn small', onclick: preset([1, 2, 3, 4, 5]) }, '평일'), el('button', { class: 'btn small', onclick: preset([0, 6]) }, '주말')),
+        el('div', { class: 'd-actions' },
+          r ? el('button', { class: 'btn danger', onclick: remove }, '지우기') : null,
+          el('button', { class: 'btn', onclick: list }, '취소'),
+          el('button', { class: 'btn primary', onclick: commit }, '저장')));
+      text.focus();
+    };
+    list();
   });
 }
 
@@ -172,6 +262,7 @@ function bindReorder() {
 }
 export function bindTodos() {
   bindReorder();
+  $('#tRoutine').onclick = () => routinesDialog();
   $('#tSort').onclick = async () => {
     const list = ofDay(T.day);
     if (list.length < 2) return;

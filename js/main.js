@@ -8,11 +8,11 @@ import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openScan, canvasFromBlob, findPaper } from './scan.js';
 import { photoSheetPdf } from './report.js';
-import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, updateTodoBadge, showTodoToday } from './todo.js';
+import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routinesForBackup, restoreRoutines, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.13.1';
-const APP_DATE = '2026-11-03';
+const APP_VERSION = '1.14.0';
+const APP_DATE = '2026-11-11';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
 // The gauge fills 0 → 100 %: it follows the start-up steps, never runs ahead of them, and is paced so it reaches 100 %
@@ -174,6 +174,7 @@ async function usePlan(ctx) {
   PV.onDragStart = ctx.onDragStart || null;
   PV.onDrag = ctx.onDrag || null;
   PV.onDragEnd = ctx.onDragEnd || null;
+  PV.onBox = ctx.onBox || null;
   PV.hideLoupe();
   PV.mount(ctx.host);
   const fl = await getFloor(ctx.floor);
@@ -185,7 +186,8 @@ async function usePlan(ctx) {
   if (planCtx !== ctx) return;
   PV.fit();
   const saved = (planViews[ctx.name] || {})[ctx.floor];
-  if (ctx.focus) PV.focus(ctx.focus, ctx.focusScale);
+  if (ctx.focusBox) PV.focusOn(ctx.focusBox);
+  else if (ctx.focus) PV.focus(ctx.focus, ctx.focusScale);
   else if (saved) PV.setView({ s: saved.s, tx: saved.tx, ty: saved.ty });
   PV.refresh();
 }
@@ -205,9 +207,35 @@ function slabMark(g, p, px, ghost) {
 // ================================================================ direction
 function angDiff(a, b) { let d = a - b; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; }
 // st: {pin, members, noMember, manualDir}; item gives the lens and the compass reading
+// The fan is the camera's view from where you stood: always the same length, as wide as the lens sees (0.5× wide,
+// 2× narrow; a sideways photo sees wider). Where it points: the photographed box or members, else the tapped direction,
+// else the compass. What exactly was photographed is the box or the members, drawn on their own.
+const FAN_R = 35;
+const FAN_HALF_SIDE = { '0.5x': 53, '1x': 34, '2x': 19, native: 34 };
+function fanHalf(item) { const t = item && item.w > item.h ? FAN_HALF_SIDE : FAN_HALF; return ((item && t[item.lens]) || t['1x']) * DEG; }
+const areaMid = (a) => [(a[0] + a[2]) / 2, (a[1] + a[3]) / 2];
+// the spot the photo is about: the box's middle, or the members' tapped points
+function aimOf(st) {
+  if (st.area) return areaMid(st.area);
+  if (!st.noMember && st.members && st.members.length) return st.members.reduce((a, r) => [a[0] + r.at[0] / st.members.length, a[1] + r.at[1] / st.members.length], [0, 0]);
+  return null;
+}
+// the part of the drawing a photo covers: its fan and what it looks at
+function reachOf(it) {
+  const xs = [it.pin[0] - FAN_R, it.pin[0] + FAN_R], ys = [it.pin[1] - FAN_R, it.pin[1] + FAN_R];
+  if (it.area) { xs.push(it.area[0], it.area[2]); ys.push(it.area[1], it.area[3]); }
+  if (!it.noMember) for (const r of it.members || []) { xs.push(r.at[0]); ys.push(r.at[1]); }
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+// a fan as it is drawn now (older photos kept other sizes)
+const fanOf = (it) => (it.fan ? { ...it.fan, r: FAN_R, half: fanHalf(it) } : null);
 function computeFan(st, item) {
   if (!st.pin) return null;
-  const half0 = (FAN_HALF[item.lens] || FAN_HALF['1x']) * DEG;
+  const half0 = fanHalf(item);
+  if (st.area) {
+    const t = areaMid(st.area);
+    if (Math.hypot(t[0] - st.pin[0], t[1] - st.pin[1]) > 0.3) return { dir: r3(Math.atan2(t[1] - st.pin[1], t[0] - st.pin[0])), half: r3(half0), r: FAN_R, src: 'area' };
+  }
   if (!st.noMember && st.members && st.members.length) {
     const vs = [];
     for (const r of st.members) {
@@ -219,21 +247,17 @@ function computeFan(st, item) {
       let sx = 0, sy = 0;
       for (const v of vs) { sx += v[0] / v[2]; sy += v[1] / v[2]; }
       const dir = Math.atan2(sy, sx);
-      let spread = 0;
-      for (const v of vs) spread = Math.max(spread, Math.abs(angDiff(Math.atan2(v[1], v[0]), dir)));
-      const half = Math.min(80 * DEG, Math.max(half0, spread + 10 * DEG));
-      const r = Math.max(...vs.map((v) => v[2])) + 2.5;
-      return { dir: r3(dir), half: r3(half), r: Math.round(r * 10) / 10, src: 'members' };
+      return { dir: r3(dir), half: r3(half0), r: FAN_R, src: 'members' };
     }
   }
-  if (st.manualDir != null) return { dir: st.manualDir, half: r3(half0), r: 35, src: 'manual' };
+  if (st.manualDir != null) return { dir: st.manualDir, half: r3(half0), r: FAN_R, src: 'manual' };
   const h = headingToPlan(item.heading, north(), S.settings.calib);
-  if (h != null) return { dir: r3(h), half: r3(half0), r: 35, src: 'compass' };
+  if (h != null) return { dir: r3(h), half: r3(half0), r: FAN_R, src: 'compass' };
   return null;
 }
 const DIRS = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
 function bearingText(theta) { const b = bearingOf(theta, north()); return `${DIRS[Math.round(b / 45) % 8]} ${b}°`; }
-const SRC = { members: '부재 기준', manual: '직접 지정', compass: '나침반' };
+const SRC = { members: '부재 기준', area: '범위 기준', manual: '직접 지정', compass: '나침반' };
 const LENS = { '0.5x': '0.5× 초광각', '1x': '1×', '2x': '2×', native: '기본 카메라', album: '앨범', scan: '문서 스캔' };
 const pitchText = (p) => (p == null ? '' : `${p > 0 ? '+' : ''}${p}°${p <= -20 ? ' (아래)' : p >= 20 ? ' (위)' : ''}`);
 
@@ -376,6 +400,7 @@ function setupOf(it) {
   return {
     floor: it.floor, pin: it.pin ? [...it.pin] : null, members: (it.members || []).map((m) => ({ ...m })),
     noMember: !!it.noMember, manualDir: it.fan && it.fan.src === 'manual' ? it.fan.dir : null, day: it.day, ts: it.ts,
+    area: it.area ? [...it.area] : null, areaMode: !!it.area,
   };
 }
 
@@ -1035,7 +1060,7 @@ function openSheet({ mode, item, draftP = null, media = null }) {
   Object.assign(C, {
     open: true, mode, item, draftP, media, saving: false,
     floor: item.floor || S.settings.capFloor,
-    pin: null, members: [], noMember: false, manualDir: null, step: 'pin', ghost: null, walked: null,
+    pin: null, members: [], noMember: false, manualDir: null, area: null, areaMode: false, step: 'pin', ghost: null, walked: null,
     issue: !!item.issue, memo: item.memo || '', ready: null,
   });
   if (mode === 'edit') {
@@ -1072,21 +1097,25 @@ function sheetCtx(focus) {
   const st = C.ghost || C;
   return {
     name: 'sheet', host: $('#shPlan'), floor: C.floor, onTap: onSheetTap,
-    onPress: onSheetPress, onHold: onSheetHold, onDragStart: onSheetDragStart, onDrag: onSheetDrag, onDragEnd: onSheetDragEnd,
+    onPress: onSheetPress, onHold: onSheetHold, onDragStart: onSheetDragStart, onDrag: onSheetDrag, onDragEnd: onSheetDragEnd, onBox: onSheetBox,
     drawStatic: drawSheetStatic, drawDynamic: drawSheetDynamic, focus: focus && st.pin ? st.pin : null,
   };
 }
 function adoptGhost() {
   if (!C.ghost) return;
   const g = C.ghost;
-  Object.assign(C, { pin: [...g.pin], members: g.members.map((m) => ({ ...m })), noMember: g.noMember, manualDir: g.manualDir, ghost: null, step: 'member' });
+  Object.assign(C, { pin: [...g.pin], members: g.members.map((m) => ({ ...m })), noMember: g.noMember, manualDir: g.manualDir, area: g.area ? [...g.area] : null, areaMode: !!g.areaMode, ghost: null, step: 'member' });
 }
 function onSheetTap(p) {
   if (!C.open || !PV.floor || PV.floor.key !== C.floor) return;
-  if (C.ghost) Object.assign(C, { ghost: null, pin: null, members: [], manualDir: null, step: 'pin' });
+  if (C.ghost) Object.assign(C, { ghost: null, pin: null, members: [], manualDir: null, area: null, step: 'pin' });
   if (!C.pin || C.step === 'pin') {
     C.pin = [r2(p[0]), r2(p[1])];
     C.step = 'member';
+  } else if (C.areaMode) {
+    // a tap inside the box clears it; drawing is a drag
+    if (C.area && p[0] >= C.area[0] && p[0] <= C.area[2] && p[1] >= C.area[1] && p[1] <= C.area[3]) C.area = null;
+    else toast('찍은 곳을 손가락으로 끌어서 네모로 그려요', 2200);
   } else if (C.noMember) {
     C.manualDir = r3(Math.atan2(p[1] - C.pin[1], p[0] - C.pin[0]));
   } else {
@@ -1115,11 +1144,27 @@ function onSheetPress(p) {
   const st = C.ghost || C;
   if (st.pin && Math.hypot(p[0] - st.pin[0], p[1] - st.pin[1]) < 24 * PV.ptPerPx()) return { mode: 'grab', offset: [st.pin[0] - p[0], st.pin[1] - p[1]] };
   if (C.ghost || !C.pin || C.step === 'pin') return { mode: 'hold' };
+  if (C.areaMode) return { mode: 'draw' };
   return null;
+}
+// 범위: the finger draws the photographed box (too small a box is ignored)
+// a one-finger drag in 범위 draws the box; a second finger (or the phone taking the touch) calls it off
+let boxWas; // the box from before this drag
+function onSheetBox(p0, p, done) {
+  if (!C.open) return;
+  if (boxWas === undefined) boxWas = C.area;
+  if (!p0) C.area = boxWas;
+  else {
+    const a = [r2(Math.min(p0[0], p[0])), r2(Math.min(p0[1], p[1])), r2(Math.max(p0[0], p[0])), r2(Math.max(p0[1], p[1]))];
+    const big = (a[2] - a[0]) / PV.ptPerPx() > 14 || (a[3] - a[1]) / PV.ptPerPx() > 14;
+    C.area = big ? a : boxWas;
+  }
+  if (done) { boxWas = undefined; renderSheet(); }
+  PV.refresh();
 }
 function onSheetHold(p) {
   if (!C.open) return false;
-  if (C.ghost) Object.assign(C, { ghost: null, pin: null, members: [], manualDir: null, step: 'pin' });
+  if (C.ghost) Object.assign(C, { ghost: null, pin: null, members: [], manualDir: null, area: null, step: 'pin' });
   C.pin = [r2(p[0]), r2(p[1])];
   C.dragging = true;
   renderSheet();
@@ -1158,10 +1203,23 @@ function drawSheetStatic(g) {
     }
   }
 }
+// the photographed box (orange) and, when it lies beyond the fan, a dashed line of sight to it;
+// drawn with the pin, in screen pixels (px = plan points per pixel), so they read at any zoom
+function drawTarget(g, st, ghost, px) {
+  if (st.area) {
+    const a = st.area;
+    svg('rect', { x: a[0], y: a[1], width: a[2] - a[0], height: a[3] - a[1], class: ghost ? 'area ghost' : 'area', 'stroke-width': 2 * px, 'stroke-dasharray': ghost ? `${5 * px} ${4 * px}` : null }, g);
+  }
+  const t = st.pin && aimOf(st);
+  if (t && Math.hypot(t[0] - st.pin[0], t[1] - st.pin[1]) > FAN_R) {
+    svg('line', { x1: st.pin[0], y1: st.pin[1], x2: t[0], y2: t[1], class: 'sight', 'stroke-width': 2 * px, 'stroke-dasharray': `${6 * px} ${5 * px}` }, g);
+  }
+}
 function drawSheetDynamic(g, px) {
   const fl = PV.floor;
   if (!C.open || !fl || fl.key !== C.floor) return;
   const st = C.ghost || C, ghost = !!C.ghost;
+  drawTarget(g, st, ghost, px);
   if (!st.noMember) for (const r of st.members) if (r.id === 'slab') slabMark(g, r.at, px, ghost);
   if (st.pin) pinMark(g, st.pin, px, ghost ? 'pin ghost' : ((C.step === 'pin' && C.pin) || C.dragging ? 'pin moving' : 'pin'));
 }
@@ -1175,6 +1233,7 @@ function sheetHint() {
   if (!C.pin && C.walked >= 6) return `지난 사진 뒤로 ${C.walked}걸음쯤 걸었어요. 서 있던 곳을 누르세요.`;
   if (!C.pin) return '서 있던 곳을 누르세요. 누른 채로 움직이면 핀이 따라와요.';
   if (C.step === 'pin') return '옮길 곳을 누르세요. 누른 채로 움직이면 핀이 따라와요.';
+  if (C.areaMode) return C.area ? '다시 끌면 새로 그려요. 네모 안을 누르면 지워져요. 두 손가락으로 도면을 움직여요.' : '찍은 곳을 손가락으로 끌어서 네모로 그리세요. 두 손가락으로 도면을 움직여요.';
   if (C.noMember) return '찍은 방향 쪽을 누르세요.' + (C.item.heading != null ? ' 안 누르면 나침반 방향으로 저장돼요.' : '');
   return C.members.length ? '부재를 더 누르거나, 고른 부재를 다시 눌러 빼세요.' : '찍은 부재(기둥·보·벽·슬래브)를 누르세요. 핀은 끌어서 옮길 수 있어요.';
 }
@@ -1182,7 +1241,8 @@ function renderSheet() {
   const st = C.ghost || C;
   $('#shFloor').textContent = floorLabel(C.floor) || '층';
   $('#shMem').setAttribute('aria-pressed', String(!st.noMember));
-  $('#shNoMem').setAttribute('aria-pressed', String(!!st.noMember));
+  $('#shArea').setAttribute('aria-pressed', String(!!st.noMember && !!st.areaMode));
+  $('#shNoMem').setAttribute('aria-pressed', String(!!st.noMember && !st.areaMode));
   const iss = $('#shIssue');
   iss.hidden = C.mode === 'fix';
   iss.setAttribute('aria-pressed', String(!!C.issue));
@@ -1212,10 +1272,12 @@ function renderSheetInfo() {
   const line = (k, ...v) => el('div', {}, el('span', { class: 'k' }, k), ...v);
   if (!st.pin) { box.replaceChildren(line('위치', '아직 안 정했어요')); return; }
   const fl = S.floorCache.get(C.floor);
-  const room = fl ? PV.roomAt(st.pin, fl) : null;
-  const where = [floorLabel(C.floor), room ? room.name : '', fl ? PV.gridOf(st.pin, fl) : ''].filter(Boolean).join(' · ');
+  const at = st.area ? areaMid(st.area) : st.pin; // the photographed box says where, not where you stood
+  const room = fl ? PV.roomAt(at, fl) : null;
+  const where = [floorLabel(C.floor), room ? room.name : '', fl ? PV.gridOf(at, fl) : ''].filter(Boolean).join(' · ');
   const rows = [line(C.ghost ? '지난 위치' : '위치', where)];
-  if (st.noMember) rows.push(line('부재', '없음 · 방향만 기록'));
+  if (st.noMember && st.areaMode) rows.push(line('범위', st.area ? '그렸어요' : '도면에서 끌어서 그리세요'));
+  else if (st.noMember) rows.push(line('부재', '없음 · 방향만 기록'));
   else rows.push(line('부재', ...(st.members.length ? st.members.map((m) => el('span', { class: 'chipm' }, m.mark || m.type)) : ['도면에서 눌러 고르세요'])));
   if (!st.noMember) for (const m of st.members) { const t = memberSpec(C.floor, m); if (t) rows.push(line('배근', `${m.mark} ${t}`)); }
   const fan = computeFan(st, C.item);
@@ -1235,14 +1297,15 @@ async function finishSheet(later) {
     const fl = await getFloor(C.floor);
     const rec = { ...base, ...memoPatch(base, C.memo), draft: false, floor: C.floor };
     if (later || !C.pin) {
-      Object.assign(rec, { pin: null, members: [], room: null, grid: '', noMember: false, fan: null });
+      Object.assign(rec, { pin: null, members: [], room: null, grid: '', noMember: false, fan: null, area: null });
     } else {
-      const room = fl ? PV.roomAt(C.pin, fl) : null;
+      const area = C.noMember && C.areaMode && C.area ? C.area.map(r2) : null, at = area ? areaMid(area) : C.pin;
+      const room = fl ? PV.roomAt(at, fl) : null;
       Object.assign(rec, {
-        pin: C.pin, noMember: C.noMember,
+        pin: C.pin, noMember: C.noMember, area,
         members: C.noMember ? [] : C.members.map((m) => ({ ...m })),
         room: room ? { code: room.code || '', name: room.name || '', type: room.type || '' } : null,
-        grid: fl ? PV.gridOf(C.pin, fl) : '',
+        grid: fl ? PV.gridOf(at, fl) : '',
       });
       rec.fan = computeFan(C, rec);
     }
@@ -1265,7 +1328,7 @@ async function finishSheet(later) {
       S.fixOf = null;
     }
     if (C.media && C.media.withPhotos && C.media.withPhotos.length && rec.pin) {
-      const loc = { floor: rec.floor, pin: rec.pin.slice(), members: (rec.members || []).map((m) => ({ ...m })), room: rec.room, grid: rec.grid, noMember: rec.noMember, fan: rec.fan };
+      const loc = { floor: rec.floor, pin: rec.pin.slice(), members: (rec.members || []).map((m) => ({ ...m })), room: rec.room, grid: rec.grid, noMember: rec.noMember, fan: rec.fan, area: rec.area ? rec.area.slice() : null };
       for (const id of C.media.withPhotos) { const p = S.byId.get(id); if (p && !p.pin) await putItem({ ...p, ...loc }); }
     }
     if (mode === 'new' && rec.pin) {
@@ -1361,7 +1424,7 @@ function renderViewerInfo(it) {
     add('층', floorLabel(it.floor));
     add('위치', it.pin ? (it.room ? it.room.name + (it.room.code && it.room.code !== it.room.name ? ` (${it.room.code})` : '') : '실 밖') : '아직 안 정했어요');
     if (it.pin) add('그리드', it.grid);
-    add('부재', it.noMember ? '없음' : memberText(it) || (it.pin ? '안 고름' : ''));
+    add('부재', it.noMember ? (it.area ? '없음 · 범위로 표시' : '없음') : memberText(it) || (it.pin ? '안 고름' : ''));
     if (!it.noMember) for (const m of it.members || []) { const t = memberSpec(it.floor, m); if (t) add('배근', `${m.mark} ${t}`); }
     if (it.fan) add('방향', `${bearingText(it.fan.dir)} · ${SRC[it.fan.src] || ''}`);
   }
@@ -1402,16 +1465,18 @@ function renderViewerActions(it) {
 }
 function viewerCtx(it) {
   return {
-    name: 'viewer', save: false, host: $('#vPlan'), floor: it.floor, focus: it.pin, onTap: null,
+    name: 'viewer', save: false, host: $('#vPlan'), floor: it.floor, focus: it.pin, focusBox: it.pin && aimOf(it) ? reachOf(it) : null, onTap: null,
     drawStatic: (g) => {
       const fl = PV.floor;
       if (!fl || fl.key !== it.floor) return;
-      if (it.fan) svg('path', { d: fanPath(it.pin, it.fan.dir, it.fan.half, it.fan.r), class: 'fan' }, g);
+      const fan = fanOf(it);
+      if (fan) svg('path', { d: fanPath(it.pin, fan.dir, fan.half, fan.r), class: 'fan' }, g);
       for (const r of it.members || []) { const m = memberOf(fl, r); if (m) svg('polygon', { points: ptsAttr(m.pts), class: 'm-sel' }, g); }
     },
     drawDynamic: (g, px) => {
       const fl = PV.floor;
       if (!fl || fl.key !== it.floor) return;
+      drawTarget(g, it, false, px);
       for (const r of it.members || []) if (r.id === 'slab') slabMark(g, r.at, px);
       pinMark(g, it.pin, px, 'pin');
     },
@@ -2192,7 +2257,7 @@ async function makeBackup(send = false) {
     const entries = [];
     const meta = {
       format: 'fieldphoto-backup', version: 1, app: APP_VERSION, created: new Date().toISOString(),
-      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], toPC: [...(S.pc || [])], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(),
+      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], toPC: [...(S.pc || [])], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(), routines: routinesForBackup(),
     };
     entries.push({ name: 'backup.json', text: JSON.stringify(meta) });
     markZip(meta);
@@ -2403,6 +2468,7 @@ async function restoreFrom(file, { many = false } = {}) {
     if (Array.isArray(meta.inPhotos)) { for (const id of meta.inPhotos) S.shared.add(id); db.kvSet('inPhotos', [...S.shared]).catch(() => {}); }
     if (Array.isArray(meta.toPC)) { for (const id of meta.toPC) S.pc.add(id); db.kvSet('toPC', [...S.pc]).catch(() => {}); }
     if (Array.isArray(meta.todos)) await restoreTodos(meta.todos);
+    if (Array.isArray(meta.routines)) await restoreRoutines(meta.routines);
     saveSettings();
     setItems(await db.all('items'));
   } catch (e) {
@@ -2829,12 +2895,13 @@ function bindUI() {
   $('#shFloor').onclick = async () => {
     const k = await chooseFloor(C.floor);
     if (!k || k === C.floor) return;
-    Object.assign(C, { floor: k, ghost: null, pin: null, members: [], manualDir: null, step: 'pin' });
+    Object.assign(C, { floor: k, ghost: null, pin: null, members: [], manualDir: null, area: null, step: 'pin' });
     renderSheet();
     C.ready = usePlan(sheetCtx(false));
   };
-  $('#shMem').onclick = () => { adoptGhost(); C.noMember = false; C.manualDir = null; renderSheet(); PV.refresh(); };
-  $('#shNoMem').onclick = () => { adoptGhost(); C.noMember = true; C.members = []; renderSheet(); PV.refresh(); };
+  $('#shMem').onclick = () => { adoptGhost(); Object.assign(C, { noMember: false, areaMode: false, area: null, manualDir: null }); renderSheet(); PV.refresh(); };
+  $('#shArea').onclick = () => { adoptGhost(); Object.assign(C, { noMember: true, areaMode: true, members: [], manualDir: null }); renderSheet(); PV.refresh(); };
+  $('#shNoMem').onclick = () => { adoptGhost(); Object.assign(C, { noMember: true, areaMode: false, area: null, members: [] }); renderSheet(); PV.refresh(); };
   $('#shIssue').onclick = () => { C.issue = !C.issue; renderSheet(); };
   $('#shMove').onclick = () => {
     if (C.ghost) adoptGhost();
