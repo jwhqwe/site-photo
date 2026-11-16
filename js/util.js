@@ -582,7 +582,7 @@ export async function shareOrDownload(blob, name, lastModified) {
   name = String(name).normalize('NFC');
   const file = new File([blob], name, { type: blob.type || 'application/octet-stream', ...(lastModified ? { lastModified } : {}) });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: name }); return 'shared'; } catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }
+    try { await navigator.share({ files: [file] }); return 'shared'; } catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }
   }
   const url = URL.createObjectURL(blob);
   const a = el('a', { href: url, download: name });

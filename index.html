@@ -18,7 +18,7 @@
 <div id="splash" class="splash" role="status" aria-live="polite">
   <img src="icons/icon-192.png" alt="" width="92" height="92">
   <h1>현장 사진</h1>
-  <p id="splashVer">버전 1.14.0 · 2026-11-11</p>
+  <p id="splashVer">버전 1.15.0 · 2026-11-16</p>
   <div class="splash-bar"><span id="splashFill"></span></div>
   <b id="splashPct" class="splash-pct">0%</b>
   <small class="splash-tip">화면을 누르면 바로 시작해요</small>
@@ -58,6 +58,13 @@
     <!-- 도면 -->
     <section id="scr-plan" class="screen" data-tab="plan">
       <header class="bar"><div id="pFloors" class="floors"></div></header>
+      <div id="pFilter" class="p-filter">
+        <select id="pfWhen" aria-label="기간"><option value="all">전체 기간</option><option value="today">오늘</option><option value="7">최근 7일</option><option value="30">최근 30일</option><option value="day">날짜 고르기</option></select>
+        <input id="pfDay" type="date" aria-label="날짜" hidden>
+        <select id="pfKind" aria-label="종류"><option value="all">모든 사진</option><option value="issue">이슈만</option><option value="open">미조치만</option></select>
+        <input id="pfFind" type="search" placeholder="찾기" aria-label="메모·부재·실에서 찾기" autocomplete="off" enterkeyhint="search">
+        <div id="pfState" class="pf-state" hidden><span id="pfCount"></span><button id="pfClear" class="btn small">모두 보기</button></div>
+      </div>
       <div id="pHost" class="plan-host"></div>
       <div class="legend"><span class="lg photo">사진 있는 부재</span><span class="lg open">미조치 이슈</span><span class="lg pin">부재 없음 사진</span><label class="lg-toggle"><input type="checkbox" id="pRooms"> 실 구역</label></div>
       <div id="pSheet" class="bottom-sheet" hidden>

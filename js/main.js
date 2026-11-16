@@ -11,8 +11,8 @@ import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routinesForBackup, restoreRoutines, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.14.0';
-const APP_DATE = '2026-11-11';
+const APP_VERSION = '1.15.0';
+const APP_DATE = '2026-11-16';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
 // The gauge fills 0 → 100 %: it follows the start-up steps, never runs ahead of them, and is paced so it reaches 100 %
@@ -896,15 +896,37 @@ async function shareBlob(it, blob) {
   }
   return outBlob(it, blob);
 }
-function shareFiles(list) {
+// files (and, if given, a message) to the share sheet. No title: messengers post a title as a message of its own.
+function shareFiles(list, text = '') {
   try {
     const files = list.map((x) => new File([x.blob], String(x.name).normalize('NFC'), { type: x.mime || x.blob.type || 'image/jpeg', lastModified: x.ts || Date.now() }));
-    if (!navigator.share || !navigator.canShare || !navigator.canShare({ files })) return Promise.resolve('unsupported');
-    return navigator.share({ files }).then(() => 'shared', (e) => (e && e.name === 'AbortError' ? 'cancelled' : 'failed'));
+    const data = { ...(files.length ? { files } : {}), ...(text ? { text } : {}) };
+    if (!navigator.share || (files.length && (!navigator.canShare || !navigator.canShare({ files })))) return Promise.resolve('unsupported');
+    return navigator.share(data).then(() => 'shared', (e) => (e && e.name === 'AbortError' ? 'cancelled' : 'failed'));
   } catch (e) {
     return Promise.resolve('failed');
   }
 }
+// Gmail takes 25 MB of attachments in one mail: sets of files that each stay under it, in order
+const MAIL_MAX = 24 * 1024 * 1024, MAIL_HARD = 25 * 1024 * 1024;
+function splitBySize(files, max = MAIL_MAX) {
+  const parts = [];
+  let cur = [], sum = 0;
+  for (const f of files) {
+    if (cur.length && sum + f.blob.size > max) { parts.push(cur); cur = []; sum = 0; }
+    cur.push(f);
+    sum += f.blob.size;
+  }
+  if (cur.length) parts.push(cur);
+  return parts;
+}
+const mailSeg = (after) => {
+  const bs = [['한 번에', false], ['메일용 25MB씩', true]].map(([l, v]) => el('button', {
+    'aria-pressed': String(!!S.settings.mailFit === v),
+    onclick: () => { if (!!S.settings.mailFit === v) return; S.settings.mailFit = v; saveSettings(); bs.forEach((b, i) => b.setAttribute('aria-pressed', String(!!i === v))); after(); },
+  }, l));
+  return el('div', { class: 'seg' }, ...bs);
+};
 // ---------------------------------------------------------------- to the office PC
 // One tap from the day page: the photos not yet sent to the PC, prepared like a share (memo and place written on,
 // shooting time inside, names), then the share sheet — LocalSend (same Wi-Fi, nothing leaves the site) or the
@@ -923,8 +945,9 @@ async function markPC(ids) {
 }
 // one dialog for sending a set of photos: as photos or as one ZIP, prepared like a share, then the share sheet
 function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onSent, sentText }) {
-  let range = ranges[0].key, fmt = S.settings[fmtKey] === 'zip' ? 'zip' : 'files', ready = null, run = 0;
-  const listOf = () => ranges.find((r) => r.key === range).list;
+  let range = ranges[0].key, fmt = S.settings[fmtKey] === 'zip' ? 'zip' : 'files', ready = null, run = 0, sentN = 0;
+  const gone = new Set(); // sent from this dialog already
+  const listOf = () => ranges.find((r) => r.key === range).list.filter((i) => !gone.has(i.id));
   return openDialog((box, close) => {
     const info = el('p', { class: 'pre' }, '');
     const go = el('button', { class: 'btn primary', disabled: true }, '보내기');
@@ -932,9 +955,19 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
       const bs = opts.map(([l, v]) => el('button', { 'aria-pressed': String(get() === v), onclick: () => { if (get() === v) return; set(v); bs.forEach((b, i) => b.setAttribute('aria-pressed', String(opts[i][1] === v))); prep(); } }, l));
       return el('div', { class: 'seg' }, ...bs);
     };
+    const show = () => {
+      const ps = ready.parts, n = ps.length - ready.at, size = ps.slice(ready.at).reduce((t, q) => t + q.files.reduce((u, x) => u + x.blob.size, 0), 0);
+      const count = ps.slice(ready.at).reduce((t, q) => t + q.ids.length, 0);
+      go.textContent = ps.length > 1 ? `보내기 ${ready.at + 1}/${ps.length}` : '보내기';
+      info.textContent = `${count}장 · ${fmtBytes(size)} 준비됐어요.` +
+        (ps.length > 1 ? `\n메일 한 통에 25MB까지라 ${ps.length}번으로 나눴어요.${ready.at ? ` ${ready.at}번 보냈고 ${n}번 남았어요.` : ''}` : '') +
+        (ready.big ? `\n25MB보다 큰 파일 ${ready.big}개는 메일로 못 가요.` : '') + `\n${hint}`;
+      go.disabled = false;
+    };
     const prep = async () => {
       const my = ++run, list = listOf();
       go.disabled = true;
+      go.textContent = '보내기';
       ready = null;
       if (!list.length) { info.textContent = '보낼 사진이 없어요.'; return; }
       const names = uniqueNames(list), multi = new Set(list.map((i) => i.day)).size > 1, out = [];
@@ -945,35 +978,46 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
         info.textContent = `준비하는 중… ${out.length}/${list.length}`;
       }
       if (my !== run) return;
-      let files = out;
-      if (fmt === 'zip') {
-        const entries = out.map((x) => ({ name: (multi ? yymmdd(x.day) + '/' : '') + x.name, blob: x.blob, date: new Date(x.ts) }));
-        if (csvList) {
-          const rows = [CSV_HEAD], fileOf = (id) => names.get(id) || '';
-          for (const x of out) rows.push(csvRow(S.byId.get(x.id), x.name, fileOf));
-          entries.push({ name: '사진목록.csv', text: csv(rows) });
+      const mail = !!S.settings.mailFit, groups = mail ? splitBySize(out) : [out], parts = [];
+      const stamp = `${yymmdd(list[0].day)}_${timeOf(Date.now()).replace(':', '')}`;
+      for (let k = 0; k < groups.length; k++) {
+        const g = groups[k];
+        let files = g;
+        if (fmt === 'zip') {
+          const entries = g.map((x) => ({ name: (multi ? yymmdd(x.day) + '/' : '') + x.name, blob: x.blob, date: new Date(x.ts) }));
+          if (csvList) {
+            const rows = [CSV_HEAD], fileOf = (id) => names.get(id) || '';
+            for (const x of g) rows.push(csvRow(S.byId.get(x.id), x.name, fileOf));
+            entries.push({ name: '사진목록.csv', text: csv(rows) });
+          }
+          const zip = await makeZip(entries, null, { windows: true });
+          if (my !== run) return;
+          files = [{ blob: zip, name: `${zipBase}_${stamp}${groups.length > 1 ? '_' + (k + 1) : ''}.zip`, mime: 'application/zip', ts: Date.now() }];
         }
-        const zip = await makeZip(entries, null, { windows: true });
-        if (my !== run) return;
-        files = [{ blob: zip, name: `${zipBase}_${yymmdd(list[0].day)}_${timeOf(Date.now()).replace(':', '')}.zip`, mime: 'application/zip', ts: Date.now() }];
+        parts.push({ files, ids: g.map((x) => x.id) });
       }
-      ready = { files, ids: out.map((x) => x.id) };
-      const size = files.reduce((t, x) => t + x.blob.size, 0);
-      info.textContent = `${out.length}장 · ${fmtBytes(size)} 준비됐어요.\n${hint}`;
-      go.disabled = false;
+      ready = { parts, at: 0, big: mail ? parts.filter((q) => q.files.reduce((t, x) => t + x.blob.size, 0) > MAIL_HARD).length : 0 };
+      show();
     };
     go.onclick = () => {
       if (!ready) return;
-      const r0 = ready;
-      shareFiles(r0.files).then(async (r) => {
-        if (r === 'unsupported' && r0.files.length === 1) r = await shareOrDownload(r0.files[0].blob, r0.files[0].name, r0.files[0].ts);
-        if (r === 'shared' || r === 'downloaded') { await onSent(r0.ids); toast(sentText(r0.ids.length)); close(); }
-        else if (r === 'unsupported') toast('여기서는 여러 장 공유가 안 돼요. ZIP 하나로 보내 주세요', 3000);
+      const r0 = ready, part = r0.parts[r0.at];
+      shareFiles(part.files).then(async (r) => {
+        if (r === 'unsupported' && part.files.length === 1) r = await shareOrDownload(part.files[0].blob, part.files[0].name, part.files[0].ts);
+        if (r === 'shared' || r === 'downloaded') {
+          for (const id of part.ids) gone.add(id);
+          sentN += part.ids.length;
+          await onSent(part.ids);
+          if (ready !== r0) return;
+          r0.at++;
+          if (r0.at >= r0.parts.length) { toast(sentText(sentN)); close(); } else show();
+        } else if (r === 'unsupported') toast('여기서는 여러 장 공유가 안 돼요. ZIP 하나로 보내 주세요', 3000);
       });
     };
     box.append(el('h3', {}, title),
       ranges.length > 1 ? seg(ranges.map((r) => [r.label, r.key]), () => range, (v) => { range = v; }) : el('p', { class: 'muted' }, ranges[0].label),
       seg([['사진 그대로', 'files'], ['ZIP 하나로', 'zip']], () => fmt, (v) => { fmt = v; S.settings[fmtKey] = v; saveSettings(); }),
+      mailSeg(() => prep()),
       info,
       el('p', { class: 'muted' }, 'PC에서 한글 이름이 깨지거나 메신저가 화질을 줄이면 "ZIP 하나로"로 보내세요. 압축을 풀면 이름이 그대로예요.'),
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => { run++; close(); } }, '닫기'), go));
@@ -1035,20 +1079,32 @@ async function shareBatch(list) {
   const already = list.filter((i) => S.shared.has(i.id)).length;
   const memos = list.filter((i) => i.kind === 'photo' && photoText(i) && !i.memoOff).length;
   await openDialog((box, close) => {
-    const go = el('button', {
-      class: 'btn primary',
-      onclick: () => {
-        shareFiles(files).then((r) => {
-          if (r === 'shared') { markShared(files.map((x) => x.id)); toast(`${files.length}개를 보냈어요`); close(); }
-          else if (r === 'unsupported') { toast('여기서는 여러 장 공유가 안 돼요. ZIP으로 받아 주세요', 3000); close(); }
-        });
-      },
-    }, '공유하기');
-    box.append(el('h3', {}, `공유 · ${files.length}개`),
-      el('p', { class: 'pre' }, `${fmtBytes(size)}` + (already ? ` · 이 중 ${already}개는 전에 보낸 적이 있어요.` : '') +
+    let left = files.slice(), sent = 0, parts = [left];
+    const note = el('p', { class: 'pre' }, '');
+    const go = el('button', { class: 'btn primary' }, '공유하기');
+    const lay = () => {
+      parts = S.settings.mailFit ? splitBySize(left) : [left];
+      const total = sent + parts.length, big = S.settings.mailFit ? left.filter((x) => x.blob.size > MAIL_HARD).length : 0;
+      go.textContent = total > 1 ? `공유하기 ${sent + 1}/${total}` : '공유하기';
+      note.textContent = `${fmtBytes(size)}` + (already ? ` · 이 중 ${already}개는 전에 보낸 적이 있어요.` : '') +
+        (total > 1 ? `\n메일 한 통에 25MB까지라 ${total}번으로 나눴어요.` : '') + (big ? `\n25MB보다 큰 파일 ${big}개는 메일로 못 가요.` : '') +
         "\n사진 앱에 넣으려면 '이미지 저장', 파일로 받으려면 '파일에 저장'을 고르세요." +
         '\n찍은 날짜·시간이 사진·영상 파일 안에 들어 있어서 사진 앱이나 PC에서도 찍은 시각으로 보여요. 메신저에 사진으로 보내면 메신저가 이 정보를 지울 수 있어요. 그럴 땐 파일로 보내세요.' +
-        (memos ? `\n메모가 있는 사진 ${memos}장은 메모가 사진 위에 같이 들어가요.` : '')),
+        (memos ? `\n메모가 있는 사진 ${memos}장은 메모가 사진 위에 같이 들어가요.` : '');
+    };
+    go.onclick = () => {
+      const part = parts[0];
+      shareFiles(part).then((r) => {
+        if (r === 'shared') {
+          markShared(part.map((x) => x.id));
+          left = left.filter((x) => !part.includes(x));
+          sent++;
+          if (left.length) lay(); else { toast(`${files.length}개를 보냈어요`); close(); }
+        } else if (r === 'unsupported') { toast('여기서는 여러 장 공유가 안 돼요. ZIP으로 받아 주세요', 3000); close(); }
+      });
+    };
+    lay();
+    box.append(el('h3', {}, `공유 · ${files.length}개`), mailSeg(lay), note,
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
   }, { dismiss: false });
 }
@@ -1720,10 +1776,161 @@ function prepOut(it) {
   shareBlob(it, blob).then((o) => { if (V.item && V.item.id === id && V.blob === blob) V.out = o; },
     () => { if (V.item && V.item.id === id && V.blob === blob) V.out = blob; });
 }
-// one photo from the viewer: the file is prepared when the viewer opens, so the tap can open the share sheet at once
+// ---------------------------------------------------------------- one photo to a messenger, with where it was taken
+// what the message says: where (층 · 실 · 그리드 · 부재) and the memo. Written from the record; the app has no AI.
+function sendText(it) {
+  if (it.tbm) return [`TBM ${tbmOf(it)}`, it.memo || ''].filter(Boolean).join('\n');
+  const where = it.doc || !it.pin || seriesOf(it) ? ''
+    : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid || '', it.noMember ? '' : memberText(it)].filter(Boolean).join(' · ');
+  return [where, it.memo || ''].filter(Boolean).join('\n');
+}
+// a picture of where a photo was taken: the drawing around the pin with the fan, the members or box it shows,
+// a small whole-floor key with the spot marked, and a line of text under it
+async function locationPicture(it) {
+  const fl = it.pin ? await getFloor(it.floor) : null;
+  if (!fl) return null;
+  const W = 1200, H = 900, CAP = 132;
+  const r = reachOf(it), cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+  const bw = Math.max((r[2] - r[0]) * 1.8, ((r[3] - r[1]) * 1.8 * W) / H, 280), bh = (bw * H) / W;
+  const box = [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2];
+  const base = await PV.snapshot(fl, box, W, H);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H + CAP;
+  const g = c.getContext('2d', { alpha: false });
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, W, H + CAP);
+  g.drawImage(base, 0, 0);
+  const k = W / bw, X = (q) => (q[0] - box[0]) * k, Y = (q) => (q[1] - box[1]) * k;
+  g.save();
+  g.beginPath(); g.rect(0, 0, W, H); g.clip();
+  g.lineJoin = 'round';
+  if (!it.noMember) {
+    for (const ref of it.members || []) {
+      const m = memberOf(fl, ref);
+      g.fillStyle = 'rgba(245,196,0,.8)'; g.strokeStyle = '#111'; g.lineWidth = 3;
+      if (m) {
+        g.beginPath();
+        m.pts.forEach((q, i) => (i ? g.lineTo(X(q), Y(q)) : g.moveTo(X(q), Y(q))));
+        g.closePath(); g.fill(); g.stroke();
+      } else if (ref.at) { g.fillRect(X(ref.at) - 10, Y(ref.at) - 10, 20, 20); g.strokeRect(X(ref.at) - 10, Y(ref.at) - 10, 20, 20); }
+    }
+  }
+  if (it.area) {
+    const a = it.area;
+    g.fillStyle = 'rgba(255,90,31,.2)'; g.strokeStyle = '#ff5a1f'; g.lineWidth = 5;
+    g.fillRect(X(a), Y(a), (a[2] - a[0]) * k, (a[3] - a[1]) * k);
+    g.strokeRect(X(a), Y(a), (a[2] - a[0]) * k, (a[3] - a[1]) * k);
+  }
+  const px = X(it.pin), py = Y(it.pin), fan = fanOf(it), t = aimOf(it);
+  if (fan) {
+    g.beginPath(); g.moveTo(px, py); g.arc(px, py, fan.r * k, fan.dir - fan.half, fan.dir + fan.half); g.closePath();
+    g.fillStyle = 'rgba(46,107,230,.22)'; g.fill();
+    g.strokeStyle = '#2e6be6'; g.lineWidth = 3; g.stroke();
+  }
+  if (t && Math.hypot(t[0] - it.pin[0], t[1] - it.pin[1]) > FAN_R) {
+    g.setLineDash([14, 10]); g.strokeStyle = '#2e6be6'; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(px, py); g.lineTo(X(t), Y(t)); g.stroke();
+    g.setLineDash([]);
+  }
+  // the spot: orange with a halo, so it is found at a glance on a black-and-white drawing
+  g.beginPath(); g.arc(px, py, 46, 0, Math.PI * 2);
+  g.fillStyle = 'rgba(255,90,31,.16)'; g.fill(); g.strokeStyle = '#ff5a1f'; g.lineWidth = 3; g.stroke();
+  g.beginPath(); g.arc(px, py, 16, 0, Math.PI * 2);
+  g.fillStyle = '#ff5a1f'; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 5; g.stroke();
+  g.beginPath(); g.arc(px, py, 19, 0, Math.PI * 2);
+  g.strokeStyle = '#111'; g.lineWidth = 2; g.stroke();
+  // the whole floor, small, with this part marked
+  const fw = fl.imgW / fl.k, fh = fl.imgH / fl.k, im = bw < fw * 0.6 ? await PV.floorImage(fl) : null;
+  if (im) {
+    const s = Math.min(300 / fw, 300 / fh), iw = fw * s, ih = fh * s, ix = 18, iy = 18;
+    g.fillStyle = '#fff'; g.fillRect(ix - 4, iy - 4, iw + 8, ih + 8);
+    g.drawImage(im, ix, iy, iw, ih);
+    g.strokeStyle = '#111'; g.lineWidth = 3; g.strokeRect(ix - 4, iy - 4, iw + 8, ih + 8);
+    const x0 = Math.max(0, (box[0] - fl.plan[0]) * s), y0 = Math.max(0, (box[1] - fl.plan[1]) * s);
+    const x1 = Math.min(iw, (box[2] - fl.plan[0]) * s), y1 = Math.min(ih, (box[3] - fl.plan[1]) * s);
+    g.fillStyle = 'rgba(227,0,15,.28)'; g.strokeStyle = '#e3000f'; g.lineWidth = 4;
+    g.fillRect(ix + x0, iy + y0, Math.max(x1 - x0, 8), Math.max(y1 - y0, 8));
+    g.strokeRect(ix + x0, iy + y0, Math.max(x1 - x0, 8), Math.max(y1 - y0, 8));
+  }
+  g.restore();
+  g.fillStyle = '#111';
+  g.fillRect(0, H, W, 4);
+  const fam = 'Pretendard, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif';
+  try { await document.fonts.load(`800 42px Pretendard`); await document.fonts.load(`700 32px Pretendard`); } catch (e) { /* the phone's own font */ }
+  const line = (text, y, size, weight, color) => {
+    let sz = size;
+    g.font = `${weight} ${sz}px ${fam}`;
+    while (g.measureText(text).width > W - 56 && sz > 20) { sz -= 2; g.font = `${weight} ${sz}px ${fam}`; }
+    g.fillStyle = color;
+    g.fillText(text, 28, y);
+  };
+  line([floorLabel(it.floor), it.room ? it.room.name : '', it.grid || ''].filter(Boolean).join(' · '), H + 60, 42, 800, '#111');
+  line([it.noMember ? (it.area ? '범위 표시' : '') : memberText(it), `${md(it.day)} ${timeOf(it.ts)}`].filter(Boolean).join(' · '), H + 108, 32, 700, '#5a5a57');
+  let blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.9));
+  if (!blob) return null;
+  try { blob = await withExif(blob, it.ts + 1000, W, H + CAP); } catch (e) { /* as it is */ }
+  return blob;
+}
+// 공유 on one photo: choose what goes (사진 · 도면 위치 · 글), then the share sheet. The choice is remembered.
 function shareOne(it) {
-  if (!V.out || !V.item || V.item.id !== it.id) { toast('사진을 준비하는 중이에요. 잠시 뒤 다시 눌러 주세요'); return; }
-  shareOrDownload(V.out, nameOf(it), it.ts).then((r) => { if (r === 'shared' || r === 'downloaded') markShared([it.id]); });
+  const parts = { photo: true, plan: true, text: true, ...(S.settings.shareParts || {}) };
+  const canPlan = !!(it.pin && S.floors.some((f) => f.key === it.floor));
+  let photo = V.item && V.item.id === it.id && V.out ? V.out : null, plan = null, planFail = false, open = true;
+  const urls = [];
+  return openDialog((box, close) => {
+    const info = el('p', { class: 'muted' }, '');
+    const txt = el('textarea', { class: 'send-text', rows: 3, placeholder: '같이 보낼 글' });
+    txt.value = sendText(it);
+    const go = el('button', { class: 'btn primary', disabled: true }, '보내기');
+    const pvPhoto = el('img', { alt: '사진' }), pvPlan = el('img', { alt: '도면 위치' }), prev = el('div', { class: 'send-prev' }, pvPhoto, pvPlan);
+    const on = (k) => !!parts[k] && (k !== 'plan' || (canPlan && !planFail)) && (k !== 'text' || !!txt.value.trim());
+    const keys = [['photo', it.kind === 'video' ? '영상' : '사진'], ['plan', '도면 위치'], ['text', '글']].map(([k, l]) => el('button', {
+      'data-k': k, disabled: k === 'plan' && !canPlan ? '' : null,
+      onclick: () => { parts[k] = !parts[k]; S.settings.shareParts = { ...parts }; saveSettings(); paint(); },
+    }, l));
+    const paint = () => {
+      keys.forEach((b) => b.setAttribute('aria-pressed', String(!!parts[b.dataset.k] && !(b.dataset.k === 'plan' && !canPlan))));
+      txt.hidden = !parts.text;
+      pvPhoto.hidden = !(parts.photo && photo && it.kind === 'photo');
+      pvPlan.hidden = !(on('plan') && plan);
+      prev.hidden = pvPhoto.hidden && pvPlan.hidden;
+      const waiting = (on('photo') && !photo) || (on('plan') && !plan);
+      go.disabled = waiting || !(on('photo') || on('plan') || on('text'));
+      info.textContent = waiting ? '준비하는 중…' : parts.plan && canPlan && planFail ? '도면 그림을 만들지 못했어요.' : parts.plan && !canPlan ? '위치를 붙인 사진만 도면 위치를 보낼 수 있어요.' : '';
+      info.hidden = !info.textContent;
+    };
+    const show = (img, blob) => { const u = URL.createObjectURL(blob); urls.push(u); img.src = u; };
+    (async () => {
+      if (!photo) {
+        const f = await db.get('files', it.id).catch(() => null);
+        if (f && f.blob) photo = await shareBlob(it, f.blob).catch(() => f.blob);
+      }
+      if (!open) return;
+      if (photo && it.kind === 'photo') show(pvPhoto, photo);
+      paint();
+    })();
+    if (canPlan) {
+      locationPicture(it).then((b) => { plan = b; planFail = !b; }, (e) => { planFail = true; console.warn('도면 위치 그림', e && e.stack || e); }).then(() => { if (!open) return; if (plan) show(pvPlan, plan); paint(); });
+    }
+    txt.oninput = paint;
+    go.onclick = () => {
+      const files = [], base = names().get(it.id) || it.id;
+      if (on('photo') && photo) files.push({ blob: photo, name: nameOf(it), mime: it.mime, ts: it.ts });
+      if (on('plan') && plan) files.push({ blob: plan, name: `${base}_위치.jpg`, mime: 'image/jpeg', ts: it.ts + 1000 });
+      const text = on('text') ? txt.value.trim() : '';
+      shareFiles(files, text).then(async (r) => {
+        if (r === 'unsupported') { // a computer: the files are downloaded, the text is copied
+          for (const f of files) await shareOrDownload(f.blob, f.name, f.ts);
+          if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+          r = files.length || text ? 'shared' : r;
+        }
+        if (r === 'shared') { if (files.some((f) => f.blob === photo)) markShared([it.id]); close(); }
+      });
+    };
+    box.append(el('h3', {}, '보내기'), el('div', { class: 'seg send-parts' }, ...keys), prev, txt, info,
+      el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
+    paint();
+  }).then(() => { open = false; urls.forEach((u) => URL.revokeObjectURL(u)); });
 }
 
 // ================================================================ days tab
@@ -2053,6 +2260,47 @@ function startTarget(t) {
 function endTarget() { S.mode = 'normal'; S.target = null; renderCamBanner(); }
 
 // ================================================================ plan tab
+// which photos the drawing shows: a period, issues only, words found in the memo · 부재 · 실 (kept until the app closes)
+const PF = { when: 'all', day: '', kind: 'all', q: '' };
+const pfOn = () => PF.when !== 'all' || PF.kind !== 'all' || !!PF.q.trim();
+function pfMatch(it) {
+  if (PF.kind === 'issue' && !it.issue) return false;
+  if (PF.kind === 'open' && !(it.issue && it.issue.status === 'open')) return false;
+  if (PF.when === 'today' && it.day !== today()) return false;
+  if ((PF.when === '7' || PF.when === '30') && daysBetween(it.day, today()) >= +PF.when) return false;
+  if (PF.when === 'day' && PF.day && it.day !== PF.day) return false;
+  const words = PF.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length) {
+    const hay = [it.memo, it.room && it.room.name, it.room && it.room.code, it.noMember ? '' : memberText(it), it.grid, names().get(it.id)]
+      .filter(Boolean).join(' ').toLowerCase().replace(/\s+/g, '');
+    for (const w of words) if (!hay.includes(w)) return false;
+  }
+  return true;
+}
+const planItems = () => vis().filter((i) => i.pin && i.floor && pfMatch(i));
+function renderPlanFilter() {
+  $('#pfWhen').value = PF.when;
+  $('#pfKind').value = PF.kind;
+  $('#pfDay').hidden = PF.when !== 'day';
+  if (PF.when === 'day') $('#pfDay').value = PF.day;
+  if ($('#pfFind').value !== PF.q) $('#pfFind').value = PF.q;
+  $('#pfWhen').classList.toggle('on', PF.when !== 'all');
+  $('#pfDay').classList.toggle('on', PF.when === 'day');
+  $('#pfKind').classList.toggle('on', PF.kind !== 'all');
+  $('#pfFind').classList.toggle('on', !!PF.q.trim());
+  $('#pfState').hidden = !pfOn();
+  if (pfOn()) {
+    const all = planItems(), here = all.filter((i) => i.floor === S.planFloor).length;
+    $('#pfCount').textContent = `골라 보는 중 · 이 층 ${here}장 · 모든 층 ${all.length}장`;
+  }
+}
+function planFilterChanged() {
+  S.planSel = null;
+  $('#pSheet').hidden = true;
+  renderPlanFilter();
+  renderPlanChips();
+  if (planCtx && planCtx.name === 'tab') PV.refresh();
+}
 let planPins = [];
 function planTabCtx() {
   return { name: 'tab', host: $('#pHost'), floor: S.planFloor, rooms: S.settings.showRooms, onTap: onPlanTap, drawStatic: drawPlanStatic, drawDynamic: drawPlanDynamic };
@@ -2060,12 +2308,13 @@ function planTabCtx() {
 function renderPlanTab() {
   if (!S.planFloor || !S.floors.some((f) => f.key === S.planFloor)) S.planFloor = S.settings.capFloor || (S.floors[0] && S.floors[0].key);
   renderPlanChips();
+  renderPlanFilter();
   $('#pRooms').checked = !!S.settings.showRooms;
   return usePlan(planTabCtx());
 }
 function renderPlanChips() {
   const counts = new Map();
-  for (const i of vis()) if (i.pin && i.floor) counts.set(i.floor, (counts.get(i.floor) || 0) + 1);
+  for (const i of planItems()) counts.set(i.floor, (counts.get(i.floor) || 0) + 1);
   $('#pFloors').replaceChildren(...S.floors.map((f) => el('button', {
     'aria-pressed': String(f.key === S.planFloor),
     onclick: () => {
@@ -2082,8 +2331,8 @@ function drawPlanStatic(g) {
   planPins = [];
   if (!fl) return;
   const state = new Map();
-  for (const it of vis()) {
-    if (it.floor !== fl.key || !it.pin) continue;
+  for (const it of planItems()) {
+    if (it.floor !== fl.key) continue;
     const open = !!(it.issue && it.issue.status === 'open');
     let any = false;
     for (const r of it.members || []) {
@@ -2118,7 +2367,7 @@ function onPlanTap(p) {
   const fl = PV.floor;
   if (!fl) return;
   S.planTap = p;
-  const located = vis().filter((i) => i.floor === fl.key && i.pin);
+  const located = planItems().filter((i) => i.floor === fl.key);
   const m = PV.hitMember(p);
   let list = [], title = '', target = null;
   if (m) {
@@ -2960,6 +3209,12 @@ function bindUI() {
   $('#dAlbum').onclick = () => importMedia(S.day, false);
   // plan
   $('#pSheetClose').onclick = () => { $('#pSheet').hidden = true; S.planSel = null; PV.refresh(); };
+  $('#pfWhen').onchange = (e) => { PF.when = e.target.value; if (PF.when === 'day' && !PF.day) PF.day = today(); planFilterChanged(); };
+  $('#pfDay').onchange = (e) => { PF.day = e.target.value || today(); planFilterChanged(); };
+  $('#pfKind').onchange = (e) => { PF.kind = e.target.value; planFilterChanged(); };
+  $('#pfFind').oninput = (e) => { PF.q = e.target.value; planFilterChanged(); };
+  $('#pfFind').onkeydown = (e) => { if (e.key === 'Enter') e.target.blur(); };
+  $('#pfClear').onclick = () => { Object.assign(PF, { when: 'all', day: '', kind: 'all', q: '' }); planFilterChanged(); };
   $('#pRooms').onchange = (e) => { S.settings.showRooms = e.target.checked; saveSettings(); if (planCtx && planCtx.name === 'tab') PV.showRooms(e.target.checked); };
   // issues
   $$('#iFilter button').forEach((b) => { b.onclick = () => { S.issueFilter = b.dataset.f; renderIssues(); }; });

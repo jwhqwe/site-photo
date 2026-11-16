@@ -379,3 +379,22 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .cam-side .btn.paused { background: var(--hl); }
 .shutter:disabled { opacity: .35; }
 #pSheetTitle { white-space: pre-line; }
+
+/* 보내기 (one photo): what goes, a look at it, the message */
+.send-parts { display: grid; width: 100%; margin: 4px 0 10px; }
+.send-parts button:disabled { opacity: .35; }
+.send-prev { display: flex; gap: 8px; margin: 0 0 10px; }
+.send-prev[hidden] { display: none; }
+.send-prev img { height: 128px; min-width: 0; max-width: calc(50% - 4px); object-fit: contain; background: var(--chip); border: 1.5px solid var(--edge); }
+.send-prev img[hidden] { display: none; }
+.send-text { width: 100%; resize: none; line-height: 1.4; }
+
+/* 도면: which photos to show */
+.p-filter { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--soft); background: var(--bg); }
+.p-filter select, .p-filter input { height: 40px; padding: 0 8px; font-size: 15px; font-weight: 700; border-radius: 8px; min-width: 0; }
+.p-filter select { flex: 0 0 auto; max-width: 118px; }
+.p-filter #pfFind { flex: 1 1 80px; font-weight: 500; }
+.p-filter #pfDay { flex: 0 0 auto; }
+.p-filter select.on, .p-filter input.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.pf-state { flex: 1 0 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 700; color: var(--accent); }
+.pf-state[hidden] { display: none; }

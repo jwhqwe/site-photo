@@ -403,6 +403,46 @@ export class PlanView {
     return page;
   }
   resetPdf() { this.hi.doc = null; this.hi.page = null; this.hi.pageKey = null; }
+  // a floor's base picture, whichever floor is on screen
+  async floorImage(floor) {
+    if (this.floor && this.floor.key === floor.key && this.img.complete && this.img.naturalWidth) return this.img;
+    if (!floor.imgBlob) return null;
+    const url = URL.createObjectURL(floor.imgBlob), im = new Image();
+    await new Promise((res) => { im.onload = res; im.onerror = res; im.src = url; });
+    URL.revokeObjectURL(url);
+    return im.naturalWidth ? im : null;
+  }
+  // a part of a floor's drawing (plan box) as a w x h canvas, for sending: drawn from the vector PDF when there is
+  // one, else cut from the base picture
+  async snapshot(floor, box, w, h) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    const scale = w / (box[2] - box[0]);
+    try {
+      if (!floor.pdfPage) throw new Error('no page');
+      const lib = await loadPdfLib();
+      if (!this.hi.doc) {
+        const blob = await this.getPdfBlob();
+        if (!blob) throw new Error('no pdf');
+        this.hi.doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
+      }
+      const page = await this.hi.doc.getPage(floor.pdfPage);
+      await page.render({ canvasContext: ctx, viewport: page.getViewport({ scale, offsetX: -box[0] * scale, offsetY: -box[1] * scale }) }).promise;
+      return c;
+    } catch (e) { /* the base picture */ }
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    const im = await this.floorImage(floor);
+    if (im) {
+      // the whole picture placed where it belongs; the canvas cuts the rest off
+      const pw = floor.imgW / floor.k, ph = floor.imgH / floor.k;
+      ctx.drawImage(im, (floor.plan[0] - box[0]) * scale, (floor.plan[1] - box[1]) * scale, pw * scale, ph * scale);
+    }
+    return c;
+  }
   async renderHi() {
     const f = this.floor;
     if (!f || !this.stage.isConnected) return;
