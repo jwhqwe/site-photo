@@ -5,11 +5,12 @@
 ## 지켜야 할 것
 - 공개 저장소다. 앱 코드만 둔다. 도면(PDF·이미지·도면 패키지 .json), 현장 사진·영상, 내보내기·백업 ZIP, 현장·회사 이름은 커밋하지 않는다.
 - 데이터는 폰 안 IndexedDB에만 저장한다. 서버로 보내는 코드, 외부 분석·광고 스크립트를 넣지 않는다.
+  - 단 하나의 예외: "AI로 다듬기"(`js/ai.js`). 사용자가 그 버튼을 누를 때만, 그 글(메모 또는 보낼 글과 위치 한 줄)을 사용자 본인의 Claude API 키로 `api.anthropic.com`에 보낸다(2026-11-16 회사 확인: 글만 가능). 사진·도면·현장/회사 이름은 보내지 않는다. 키는 폰 설정에만 두고 백업·저장소에 넣지 않는다. 자동으로 보내는 코드는 넣지 않는다.
 - 인터넷 없이 동작해야 한다(서비스 워커 sw.js).
 
 ## 구조
 - 배포: `gh-pages` 브랜치 루트를 GitHub Pages가 그대로 서빙한다. 빌드 단계는 없다.
-- `index.html`, `app.css`, `js/main.js`(화면·흐름), `js/plan.js`(도면 보기·확대 시 PDF 벡터 재렌더링), `js/camera.js`(앱 카메라·기본 카메라·나침반), `js/db.js`(IndexedDB), `js/util.js`(이름 규칙·CSV·ZIP), `js/ui.js`(대화상자), `vendor/`(pdf.js 3.11.174).
+- `index.html`, `app.css`, `js/main.js`(화면·흐름), `js/plan.js`(도면 보기·확대 시 PDF 벡터 재렌더링), `js/camera.js`(앱 카메라·기본 카메라·나침반), `js/db.js`(IndexedDB), `js/util.js`(이름 규칙·CSV·ZIP), `js/ui.js`(대화상자), `js/ai.js`(AI로 다듬기), `vendor/`(pdf.js 3.11.174).
 - 코드를 바꾸면 `sw.js`의 `VERSION` 값을 바꿔야 폰에 새 버전이 들어간다.
 - 도면은 앱의 "도면 파일 가져오기"로 폰에서 넣는 패키지(format `fieldphoto-drawings`)에서 온다.
 

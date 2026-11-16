@@ -10,8 +10,9 @@ import { openScan, canvasFromBlob, findPaper } from './scan.js';
 import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routinesForBackup, restoreRoutines, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
+import { askAI, aiErrorText } from './ai.js';
 
-const APP_VERSION = '1.15.1';
+const APP_VERSION = '1.16.0';
 const APP_DATE = '2026-11-16';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -1701,7 +1702,7 @@ async function setIssue(it, v) {
   renderCurrent();
 }
 async function editMemo(it) {
-  const t = await promptText('메모', it.memo || '', { placeholder: '예: 균열 0.3mm, 다음 주 재확인' });
+  const t = await memoBox(it.memo || '');
   if (t === null) return;
   const cur = S.byId.get(it.id);
   await putItem({ ...cur, ...memoPatch(cur, t) });
@@ -1811,6 +1812,41 @@ function prepOut(it) {
   shareBlob(it, blob).then((o) => { if (V.item && V.item.id === id && V.blob === blob) V.out = o; },
     () => { if (V.item && V.item.id === id && V.blob === blob) V.out = blob; });
 }
+// "AI로 다듬기" under a text box: the box's text goes to the AI (the user's own key, 더보기 → AI 연결) and the answer
+// takes its place; 되돌리기 puts the text from before back. head(): a line to send above it (the place), if any.
+function aiRow(inp, kind, after = () => {}) {
+  let before = null, busyNow = false;
+  const undo = el('button', { class: 'btn small', hidden: '', onclick: () => { if (before === null) return; inp.value = before; before = null; undo.hidden = true; after(); } }, '되돌리기');
+  const go = el('button', {
+    class: 'btn small ai-go',
+    onclick: async () => {
+      const text = inp.value.trim();
+      if (busyNow) return;
+      if (!text) { toast('먼저 글을 적어 주세요'); return; }
+      if (!S.settings.aiKey) { toast(aiErrorText({ code: 'nokey' }), 3200); return; }
+      busyNow = true;
+      go.disabled = true;
+      go.textContent = 'AI가 쓰는 중…';
+      try {
+        const out = await askAI(S.settings.aiKey, kind, text, S.settings.aiStyle || '');
+        if (!inp.isConnected) return;
+        before = inp.value;
+        inp.value = out;
+        undo.hidden = false;
+        after();
+      } catch (e) {
+        toast(aiErrorText(e), 3200);
+      } finally {
+        busyNow = false;
+        go.disabled = false;
+        go.textContent = 'AI로 다듬기';
+      }
+    },
+  }, 'AI로 다듬기');
+  return el('div', { class: 'ai-row' }, go, undo);
+}
+const memoBox = (value) => promptText('메모', value, { placeholder: '예: 균열 0.3mm, 다음 주 재확인', extra: (inp) => aiRow(inp, 'memo') });
+
 // ---------------------------------------------------------------- one photo to a messenger, with where it was taken
 // what the message says: where (층 · 실 · 그리드 · 부재) and the memo. Written from the record; the app has no AI.
 function sendText(it) {
@@ -1964,7 +2000,11 @@ function shareOne(it) {
         if (r === 'shared') { if (files.some((f) => f.blob === photo)) markShared([it.id]); close(); }
       });
     };
-    box.append(el('h3', {}, '보내기'), el('div', { class: 'seg send-parts' }, ...keys), prev, txt, info,
+    const ai = aiRow(txt, 'message', () => paint());
+    const paintAi = () => { ai.hidden = !parts.text; };
+    keys.forEach((b) => b.addEventListener('click', paintAi));
+    paintAi();
+    box.append(el('h3', {}, '보내기'), el('div', { class: 'seg send-parts' }, ...keys), prev, txt, ai, info,
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
     paint();
   }).then(() => { open = false; urls.forEach((u) => URL.revokeObjectURL(u)); });
@@ -2543,7 +2583,7 @@ async function makeBackup(send = false) {
     const entries = [];
     const meta = {
       format: 'fieldphoto-backup', version: 1, app: APP_VERSION, created: new Date().toISOString(),
-      pkg: S.pkg, settings: S.settings, items, inPhotos: [...S.shared], toPC: [...(S.pc || [])], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(), routines: routinesForBackup(),
+      pkg: S.pkg, settings: { ...S.settings, aiKey: undefined }, items, inPhotos: [...S.shared], toPC: [...(S.pc || [])], registers: await db.all('registers'), regItems: await db.all('regItems'), todos: todosForBackup(), routines: routinesForBackup(),
     };
     entries.push({ name: 'backup.json', text: JSON.stringify(meta) });
     markZip(meta);
@@ -3069,6 +3109,36 @@ async function renderMore() {
     el('p', {}, '고른 기간의 사진을 정해진 이름으로 바꿔 ZIP 하나로 묶어요. 사진목록.csv(엑셀)가 같이 들어가요.'),
     btns(btn('기간 골라 내보내기', exportRange))));
   const last = S.settings.lastBackup;
+  const aiKey = S.settings.aiKey || '';
+  parts.push(group('AI 연결',
+    el('p', {}, "메모나 보낼 글에서 'AI로 다듬기'를 누를 때만, 그 글(위치 한 줄 포함)이 Claude(Anthropic) 서버로 가요. 사진·도면·현장 이름은 가지 않아요. 키는 이 폰에만 있고 백업에 들어가지 않아요."),
+    el('p', { id: 'aiState' }, aiKey ? `연결됨 · 키 끝자리 ${aiKey.slice(-4)}` : '아직 키가 없어요.'),
+    S.settings.aiStyle ? el('p', {}, `내 지시: ${S.settings.aiStyle}`) : null,
+    btns(
+      btn(aiKey ? '키 바꾸기' : '키 넣기', async () => {
+        const t = await promptText('Claude API 키', '', { placeholder: 'sk-ant-…', multiline: false, secret: true, hint: 'platform.claude.com에서 만든 API 키를 붙여 넣어요.' });
+        if (t === null || !t.trim()) return;
+        S.settings.aiKey = t.trim();
+        saveSettings();
+        renderMore();
+      }),
+      aiKey ? btn('연결 확인', async () => {
+        const b = busy('AI에 물어보는 중…');
+        try { await askAI(aiKey, 'ping', 'ok'); toast('AI와 연결됐어요'); } catch (e) { toast(aiErrorText(e), 3200); } finally { b.done(); }
+      }) : null,
+      btn('말투 지시', async () => {
+        const t = await promptText('AI에게 줄 지시', S.settings.aiStyle || '', { placeholder: '예: 끝에 "확인 부탁드립니다"를 붙여줘', hint: '다듬을 때마다 같이 전해요. 비워 두면 기본 말투예요.' });
+        if (t === null) return;
+        S.settings.aiStyle = t;
+        saveSettings();
+        renderMore();
+      }),
+      aiKey ? btn('키 지우기', async () => {
+        if (!(await confirmBox('AI 키를 지울까요?', '이 폰에서 키만 지워요. 사진과 메모는 그대로예요.', '지우기', true))) return;
+        delete S.settings.aiKey;
+        saveSettings();
+        renderMore();
+      }, 'danger') : null)));
   parts.push(group('백업',
     el('p', {}, last ? `마지막 백업 ${dayLabel(dayOf(last))} ${timeOf(last)}` : '아직 백업한 적이 없어요.'),
     el('p', {}, '사진·기록·도면을 ZIP 하나로 묶어요. 폰을 바꾸거나 앱을 지울 때 이 파일로 되살려요.'),
@@ -3196,7 +3266,7 @@ function bindUI() {
     PV.refresh();
   };
   $('#shMemo').onclick = async () => {
-    const t = await promptText('메모', C.memo, { placeholder: '예: 균열 0.3mm, 다음 주 재확인' });
+    const t = await memoBox(C.memo);
     if (t !== null) { C.memo = t; renderSheet(); }
   };
   $('#shLater').onclick = () => finishSheet(true);

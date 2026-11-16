@@ -47,13 +47,16 @@ export function alertBox(title, msg) {
   });
 }
 
-export function promptText(title, value = '', { placeholder = '', ok = '저장', multiline = true, hint = '' } = {}) {
+// extra(inp): a row of keys under the box (AI로 다듬기)
+export function promptText(title, value = '', { placeholder = '', ok = '저장', multiline = true, hint = '', extra = null, secret = false } = {}) {
   return openDialog((box, close) => {
-    const inp = el(multiline ? 'textarea' : 'input', { placeholder, rows: multiline ? 4 : null });
+    const inp = el(multiline ? 'textarea' : 'input', { placeholder, rows: multiline ? 4 : null, type: secret ? 'password' : null, autocomplete: secret ? 'off' : null });
     inp.value = value || '';
     box.append(el('h3', {}, title));
     if (hint) box.append(el('p', {}, hint));
-    box.append(inp, actions(
+    box.append(inp);
+    if (extra) box.append(extra(inp));
+    box.append(actions(
       el('button', { class: 'btn', onclick: () => close(null) }, '취소'),
       el('button', { class: 'btn primary', onclick: () => close(inp.value.trim()) }, ok)));
     setTimeout(() => inp.focus(), 60);
