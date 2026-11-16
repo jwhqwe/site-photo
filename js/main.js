@@ -4,14 +4,14 @@ import {
   makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, turnMovie, shotTime, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
 } from './util.js';
 import * as db from './db.js';
-import { PlanView, svg, ptsAttr, fanPath, centroid, polyDist } from './plan.js';
+import { PlanView, svg, ptsAttr, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openScan, canvasFromBlob, findPaper } from './scan.js';
 import { photoSheetPdf } from './report.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routinesForBackup, restoreRoutines, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.15.1';
 const APP_DATE = '2026-11-16';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
@@ -227,6 +227,41 @@ function reachOf(it) {
   if (!it.noMember) for (const r of it.members || []) { xs.push(r.at[0]); ys.push(r.at[1]); }
   return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
 }
+// What the fan shows: from where you stood (the pin), toward what was photographed (or the compass), as wide as the
+// lens sees, as far as the view goes: it stops at the first wall, FAN_R at most (about 10 m on these drawings).
+// A wall the pin sits on or right beside (within 1.5 pt, a tap is not that exact) does not block.
+function wallsOf(fl) {
+  if (!fl._walls) {
+    Object.defineProperty(fl, '_walls', { value: fl.members.filter((m) => m.type === '벽' && m.pts && m.pts.length > 2).map((m) => {
+      const xs = m.pts.map((q) => q[0]), ys = m.pts.map((q) => q[1]);
+      return { pts: m.pts, box: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] };
+    }) });
+  }
+  return fl._walls;
+}
+function fanPoints(fl, pin, fan) {
+  const r = fan.r, near = 1.5, segs = [];
+  for (const w of fl ? wallsOf(fl) : []) {
+    const b = w.box;
+    if (b[0] > pin[0] + r || b[2] < pin[0] - r || b[1] > pin[1] + r || b[3] < pin[1] - r) continue;
+    if (polyDist(pin, w.pts) < near) continue;
+    for (let i = 0, j = w.pts.length - 1; i < w.pts.length; j = i++) segs.push([w.pts[j], w.pts[i]]);
+  }
+  const n = Math.max(8, Math.ceil((fan.half * 2) / (Math.PI / 180))), out = [];
+  for (let k = 0; k <= n; k++) {
+    const a = fan.dir - fan.half + (fan.half * 2 * k) / n, dx = Math.cos(a), dy = Math.sin(a);
+    let t = r;
+    for (const [p, q] of segs) {
+      const ex = q[0] - p[0], ey = q[1] - p[1], den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-9) continue;
+      const wx = p[0] - pin[0], wy = p[1] - pin[1], tt = (wx * ey - wy * ex) / den, u = (wx * dy - wy * dx) / den;
+      if (tt > 0 && tt < t && u >= 0 && u <= 1) t = tt;
+    }
+    out.push([pin[0] + dx * t, pin[1] + dy * t]);
+  }
+  return out;
+}
+const fanD = (fl, pin, fan) => `M${pin[0]},${pin[1]} ` + fanPoints(fl, pin, fan).map((q) => `L${q[0].toFixed(2)},${q[1].toFixed(2)}`).join(' ') + ' Z';
 // a fan as it is drawn now (older photos kept other sizes)
 const fanOf = (it) => (it.fan ? { ...it.fan, r: FAN_R, half: fanHalf(it) } : null);
 function computeFan(st, item) {
@@ -1251,7 +1286,7 @@ function drawSheetStatic(g) {
   if (!C.open || !fl || fl.key !== C.floor) return;
   const st = C.ghost || C, ghost = !!C.ghost;
   const fan = computeFan(st, C.item);
-  if (fan) svg('path', { d: fanPath(st.pin, fan.dir, fan.half, fan.r), class: ghost ? 'fan ghost' : 'fan' }, g);
+  if (fan) svg('path', { d: fanD(fl, st.pin, fan), class: ghost ? 'fan ghost' : 'fan' }, g);
   if (!st.noMember) {
     for (const r of st.members) {
       const m = memberOf(fl, r);
@@ -1526,7 +1561,7 @@ function viewerCtx(it) {
       const fl = PV.floor;
       if (!fl || fl.key !== it.floor) return;
       const fan = fanOf(it);
-      if (fan) svg('path', { d: fanPath(it.pin, fan.dir, fan.half, fan.r), class: 'fan' }, g);
+      if (fan) svg('path', { d: fanD(fl, it.pin, fan), class: 'fan' }, g);
       for (const r of it.members || []) { const m = memberOf(fl, r); if (m) svg('polygon', { points: ptsAttr(m.pts), class: 'm-sel' }, g); }
     },
     drawDynamic: (g, px) => {
@@ -1823,7 +1858,9 @@ async function locationPicture(it) {
   }
   const px = X(it.pin), py = Y(it.pin), fan = fanOf(it), t = aimOf(it);
   if (fan) {
-    g.beginPath(); g.moveTo(px, py); g.arc(px, py, fan.r * k, fan.dir - fan.half, fan.dir + fan.half); g.closePath();
+    g.beginPath(); g.moveTo(px, py);
+    for (const q of fanPoints(fl, it.pin, fan)) g.lineTo(X(q), Y(q));
+    g.closePath();
     g.fillStyle = 'rgba(46,107,230,.22)'; g.fill();
     g.strokeStyle = '#2e6be6'; g.lineWidth = 3; g.stroke();
   }
