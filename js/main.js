@@ -12,8 +12,8 @@ import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routin
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 import { askAI, aiErrorText } from './ai.js';
 
-const APP_VERSION = '1.16.0';
-const APP_DATE = '2026-11-16';
+const APP_VERSION = '1.16.1';
+const APP_DATE = '2026-11-17';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
 // The gauge fills 0 → 100 %: it follows the start-up steps, never runs ahead of them, and is paced so it reaches 100 %
@@ -956,6 +956,40 @@ function splitBySize(files, max = MAIL_MAX) {
   if (cur.length) parts.push(cur);
   return parts;
 }
+// a photo made smaller (long side, JPEG quality), upright, with its time kept; anything else as it is
+async function shrinkPhoto(x, side, q) {
+  if (!/jpe?g/i.test(x.mime || x.blob.type || '')) return x.blob;
+  const url = URL.createObjectURL(x.blob);
+  try {
+    const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, side / Math.max(im.naturalWidth, im.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(im.naturalWidth * k); c.height = Math.round(im.naturalHeight * k);
+    c.getContext('2d', { alpha: false }).drawImage(im, 0, 0, c.width, c.height);
+    const b = await new Promise((res) => c.toBlob(res, 'image/jpeg', q));
+    if (!b || b.size >= x.blob.size) return x.blob;
+    return await withExif(b, x.ts, c.width, c.height).catch(() => b);
+  } catch (e) {
+    return x.blob;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+// the whole set under one mail (25 MB): photos are made smaller step by step until it fits
+const FIT_STEPS = [[3200, 0.86], [2560, 0.84], [2048, 0.82], [1600, 0.8], [1280, 0.76], [1024, 0.72]];
+async function fitOneMail(out, onStep = () => {}) {
+  const total = (a) => a.reduce((t, x) => t + x.blob.size, 0);
+  if (total(out) <= MAIL_MAX) return { out, side: 0 };
+  let cur = out, side = 0;
+  for (const [s, q] of FIT_STEPS) {
+    onStep(s);
+    cur = [];
+    for (const x of out) cur.push({ ...x, blob: await shrinkPhoto(x, s, q) });
+    side = s;
+    if (total(cur) <= MAIL_MAX) break;
+  }
+  return { out: cur, side, over: total(cur) > MAIL_MAX };
+}
 const mailSeg = (after) => {
   const bs = [['한 번에', false], ['메일용 25MB씩', true]].map(([l, v]) => el('button', {
     'aria-pressed': String(!!S.settings.mailFit === v),
@@ -980,7 +1014,8 @@ async function markPC(ids) {
   renderCurrent();
 }
 // one dialog for sending a set of photos: as photos or as one ZIP, prepared like a share, then the share sheet
-function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onSent, sentText }) {
+// oneMail: never split; photos are made smaller until the set fits one mail (TBM)
+function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onSent, sentText, oneMail = false }) {
   let range = ranges[0].key, fmt = S.settings[fmtKey] === 'zip' ? 'zip' : 'files', ready = null, run = 0, sentN = 0;
   const gone = new Set(); // sent from this dialog already
   const listOf = () => ranges.find((r) => r.key === range).list.filter((i) => !gone.has(i.id));
@@ -997,7 +1032,9 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
       go.textContent = ps.length > 1 ? `보내기 ${ready.at + 1}/${ps.length}` : '보내기';
       info.textContent = `${count}장 · ${fmtBytes(size)} 준비됐어요.` +
         (ps.length > 1 ? `\n메일 한 통에 25MB까지라 ${ps.length}번으로 나눴어요.${ready.at ? ` ${ready.at}번 보냈고 ${n}번 남았어요.` : ''}` : '') +
-        (ready.big ? `\n25MB보다 큰 파일 ${ready.big}개는 메일로 못 가요.` : '') + `\n${hint}`;
+        (ready.big ? `\n25MB보다 큰 파일 ${ready.big}개는 메일로 못 가요.` : '') +
+        (ready.fit && ready.fit.side ? `\n메일 한 통(25MB)에 들어가게 사진을 긴 쪽 ${ready.fit.side}px로 줄였어요.` : '') +
+        (ready.fit && ready.fit.over ? '\n영상 때문에 25MB를 넘어요. 영상은 따로 보내 주세요.' : '') + `\n${hint}`;
       go.disabled = false;
     };
     const prep = async () => {
@@ -1014,7 +1051,13 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
         info.textContent = `준비하는 중… ${out.length}/${list.length}`;
       }
       if (my !== run) return;
-      const mail = !!S.settings.mailFit, groups = mail ? splitBySize(out) : [out], parts = [];
+      let fit = null;
+      if (oneMail) {
+        fit = await fitOneMail(out, (s) => { info.textContent = `메일 한 통에 맞게 줄이는 중… (긴 쪽 ${s}px)`; });
+        if (my !== run) return;
+        out.splice(0, out.length, ...fit.out);
+      }
+      const mail = !oneMail && !!S.settings.mailFit, groups = mail ? splitBySize(out) : [out], parts = [];
       const stamp = `${yymmdd(list[0].day)}_${timeOf(Date.now()).replace(':', '')}`;
       for (let k = 0; k < groups.length; k++) {
         const g = groups[k];
@@ -1032,7 +1075,7 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
         }
         parts.push({ files, ids: g.map((x) => x.id) });
       }
-      ready = { parts, at: 0, big: mail ? parts.filter((q) => q.files.reduce((t, x) => t + x.blob.size, 0) > MAIL_HARD).length : 0 };
+      ready = { parts, at: 0, big: mail ? parts.filter((q) => q.files.reduce((t, x) => t + x.blob.size, 0) > MAIL_HARD).length : 0, fit };
       show();
     };
     go.onclick = () => {
@@ -1053,7 +1096,7 @@ function sendDialog({ title, ranges, zipBase, fmtKey, csvList = false, hint, onS
     box.append(el('h3', {}, title),
       ranges.length > 1 ? seg(ranges.map((r) => [r.label, r.key]), () => range, (v) => { range = v; }) : el('p', { class: 'muted' }, ranges[0].label),
       seg([['사진 그대로', 'files'], ['ZIP 하나로', 'zip']], () => fmt, (v) => { fmt = v; S.settings[fmtKey] = v; saveSettings(); }),
-      mailSeg(() => prep()),
+      oneMail ? null : mailSeg(() => prep()),
       info,
       el('p', { class: 'muted' }, 'PC에서 한글 이름이 깨지거나 메신저가 화질을 줄이면 "ZIP 하나로"로 보내세요. 압축을 풀면 이름이 그대로예요.'),
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => { run++; close(); } }, '닫기'), go));
@@ -1077,8 +1120,8 @@ function sendTbm(day) {
   return sendDialog({
     title: `TBM 보내기 · ${dayLabel(day)}`, zipBase: 'TBM', fmtKey: 'tbmFormat',
     ranges: [{ key: 'tbm', label: `TBM ${list.length}장 (${count})`, list }],
-    hint: '"보내기" → 메신저나 LocalSend를 고르세요.',
-    onSent: markShared, sentText: (n) => `TBM ${n}장 보냈어요`,
+    hint: '"보내기" → 메일이나 메신저를 고르세요.',
+    onSent: markShared, sentText: (n) => `TBM ${n}장 보냈어요`, oneMail: true,
   });
 }
 async function markShared(ids) {
