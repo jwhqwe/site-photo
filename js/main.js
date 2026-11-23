@@ -12,8 +12,8 @@ import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routin
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 import { askAI, aiErrorText } from './ai.js';
 
-const APP_VERSION = '1.16.1';
-const APP_DATE = '2026-11-17';
+const APP_VERSION = '1.17.0';
+const APP_DATE = '2026-11-23';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
 // The gauge fills 0 → 100 %: it follows the start-up steps, never runs ahead of them, and is paced so it reaches 100 %
@@ -1140,53 +1140,7 @@ function uniqueNames(list) {
   }
   return out;
 }
-async function shareBatch(list) {
-  list = list.filter((i) => !i.draft).sort((a, b) => a.ts - b.ts);
-  if (!list.length) return;
-  const fileName = uniqueNames(list);
-  const b = busy('사진을 준비하는 중…');
-  const files = [];
-  try {
-    for (const it of list) {
-      const f = await db.get('files', it.id);
-      if (f && f.blob) files.push({ id: it.id, blob: await shareBlob(it, f.blob), name: fileName.get(it.id), mime: it.mime, ts: it.ts });
-      b.set(`사진을 준비하는 중… ${files.length}/${list.length}`);
-    }
-  } finally { b.done(); }
-  if (!files.length) { toast('파일을 찾지 못했어요'); return; }
-  const size = files.reduce((t, x) => t + x.blob.size, 0);
-  const already = list.filter((i) => S.shared.has(i.id)).length;
-  const memos = list.filter((i) => i.kind === 'photo' && photoText(i) && !i.memoOff).length;
-  await openDialog((box, close) => {
-    let left = files.slice(), sent = 0, parts = [left];
-    const note = el('p', { class: 'pre' }, '');
-    const go = el('button', { class: 'btn primary' }, '공유하기');
-    const lay = () => {
-      parts = S.settings.mailFit ? splitBySize(left) : [left];
-      const total = sent + parts.length, big = S.settings.mailFit ? left.filter((x) => x.blob.size > MAIL_HARD).length : 0;
-      go.textContent = total > 1 ? `공유하기 ${sent + 1}/${total}` : '공유하기';
-      note.textContent = `${fmtBytes(size)}` + (already ? ` · 이 중 ${already}개는 전에 보낸 적이 있어요.` : '') +
-        (total > 1 ? `\n메일 한 통에 25MB까지라 ${total}번으로 나눴어요.` : '') + (big ? `\n25MB보다 큰 파일 ${big}개는 메일로 못 가요.` : '') +
-        "\n사진 앱에 넣으려면 '이미지 저장', 파일로 받으려면 '파일에 저장'을 고르세요." +
-        '\n찍은 날짜·시간이 사진·영상 파일 안에 들어 있어서 사진 앱이나 PC에서도 찍은 시각으로 보여요. 메신저에 사진으로 보내면 메신저가 이 정보를 지울 수 있어요. 그럴 땐 파일로 보내세요.' +
-        (memos ? `\n메모가 있는 사진 ${memos}장은 메모가 사진 위에 같이 들어가요.` : '');
-    };
-    go.onclick = () => {
-      const part = parts[0];
-      shareFiles(part).then((r) => {
-        if (r === 'shared') {
-          markShared(part.map((x) => x.id));
-          left = left.filter((x) => !part.includes(x));
-          sent++;
-          if (left.length) lay(); else { toast(`${files.length}개를 보냈어요`); close(); }
-        } else if (r === 'unsupported') { toast('여기서는 여러 장 공유가 안 돼요. ZIP으로 받아 주세요', 3000); close(); }
-      });
-    };
-    lay();
-    box.append(el('h3', {}, `공유 · ${files.length}개`), mailSeg(lay), note,
-      el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
-  }, { dismiss: false });
-}
+const shareBatch = (list) => shareSet(list);
 
 // ================================================================ location sheet (after the shutter)
 const C = { open: false };
@@ -1900,6 +1854,50 @@ function sendText(it) {
 }
 // a picture of where a photo was taken: the drawing around the pin with the fan, the members or box it shows,
 // a small whole-floor key with the spot marked, and a line of text under it
+// the whole floor at w x h: the vector drawing rendered at that size, darkened a little so thin lines still read
+const keyMaps = new Map();
+async function keyMap(fl, w, h) {
+  const k = `${fl.key}|${w}x${h}`;
+  if (keyMaps.has(k)) return keyMaps.get(k);
+  let c = null;
+  if (fl.pdfPage) {
+    try {
+      c = await PV.snapshot(fl, [fl.plan[0], fl.plan[1], fl.plan[0] + fl.imgW / fl.k, fl.plan[1] + fl.imgH / fl.k], w * 2, h * 2);
+      c = halve(c, w, h);
+    } catch (e) { c = null; }
+  }
+  if (!c) {
+    const im = await PV.floorImage(fl);
+    if (im) c = halve(im, w, h);
+  }
+  if (c) {
+    const g = c.getContext('2d');
+    g.globalCompositeOperation = 'multiply';
+    g.drawImage(c, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+  }
+  keyMaps.set(k, c);
+  return c;
+}
+// a picture made smaller by halves (each step averages 2x2), so lines thin out instead of breaking
+function halve(src, w, h) {
+  let cur = src, cw = src.naturalWidth || src.width, ch = src.naturalHeight || src.height;
+  while (cw / 2 >= w && ch / 2 >= h) {
+    const c = document.createElement('canvas');
+    c.width = Math.round(cw / 2); c.height = Math.round(ch / 2);
+    const g = c.getContext('2d', { alpha: false });
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(cur, 0, 0, c.width, c.height);
+    cur = c; cw = c.width; ch = c.height;
+  }
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const g = out.getContext('2d', { alpha: false });
+  g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(cur, 0, 0, w, h);
+  return out;
+}
 async function locationPicture(it) {
   const fl = it.pin ? await getFloor(it.floor) : null;
   if (!fl) return null;
@@ -1955,18 +1953,22 @@ async function locationPicture(it) {
   g.fillStyle = '#ff5a1f'; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 5; g.stroke();
   g.beginPath(); g.arc(px, py, 19, 0, Math.PI * 2);
   g.strokeStyle = '#111'; g.lineWidth = 2; g.stroke();
-  // the whole floor, small, with this part marked
-  const fw = fl.imgW / fl.k, fh = fl.imgH / fl.k, im = bw < fw * 0.6 ? await PV.floorImage(fl) : null;
-  if (im) {
-    const s = Math.min(300 / fw, 300 / fh), iw = fw * s, ih = fh * s, ix = 18, iy = 18;
-    g.fillStyle = '#fff'; g.fillRect(ix - 4, iy - 4, iw + 8, ih + 8);
-    g.drawImage(im, ix, iy, iw, ih);
-    g.strokeStyle = '#111'; g.lineWidth = 3; g.strokeRect(ix - 4, iy - 4, iw + 8, ih + 8);
-    const x0 = Math.max(0, (box[0] - fl.plan[0]) * s), y0 = Math.max(0, (box[1] - fl.plan[1]) * s);
-    const x1 = Math.min(iw, (box[2] - fl.plan[0]) * s), y1 = Math.min(ih, (box[3] - fl.plan[1]) * s);
-    g.fillStyle = 'rgba(227,0,15,.28)'; g.strokeStyle = '#e3000f'; g.lineWidth = 4;
-    g.fillRect(ix + x0, iy + y0, Math.max(x1 - x0, 8), Math.max(y1 - y0, 8));
-    g.strokeRect(ix + x0, iy + y0, Math.max(x1 - x0, 8), Math.max(y1 - y0, 8));
+  // the whole floor, small, with this part marked: drawn from the vector drawing at its own size (a scaled-down
+  // picture of thin lines breaks up), the base picture stepped down by halves when there is no PDF
+  const fw = fl.imgW / fl.k, fh = fl.imgH / fl.k;
+  if (bw < fw * 0.6) {
+    const s = Math.min(340 / fw, 340 / fh), iw = Math.round(fw * s), ih = Math.round(fh * s), ix = 18, iy = 18;
+    const key = await keyMap(fl, iw, ih);
+    if (key) {
+      g.fillStyle = '#fff'; g.fillRect(ix - 5, iy - 5, iw + 10, ih + 10);
+      g.drawImage(key, ix, iy, iw, ih);
+      g.strokeStyle = '#111'; g.lineWidth = 3; g.strokeRect(ix - 5, iy - 5, iw + 10, ih + 10);
+      const x0 = Math.max(0, (box[0] - fl.plan[0]) * s), y0 = Math.max(0, (box[1] - fl.plan[1]) * s);
+      const x1 = Math.min(iw, (box[2] - fl.plan[0]) * s), y1 = Math.min(ih, (box[3] - fl.plan[1]) * s);
+      g.fillStyle = 'rgba(227,0,15,.22)'; g.strokeStyle = '#e3000f'; g.lineWidth = 4;
+      g.fillRect(ix + x0, iy + y0, Math.max(x1 - x0, 10), Math.max(y1 - y0, 10));
+      g.strokeRect(ix + x0, iy + y0, Math.max(x1 - x0, 10), Math.max(y1 - y0, 10));
+    }
   }
   g.restore();
   g.fillStyle = '#111';
@@ -1987,70 +1989,131 @@ async function locationPicture(it) {
   try { blob = await withExif(blob, it.ts + 1000, W, H + CAP); } catch (e) { /* as it is */ }
   return blob;
 }
-// 공유 on one photo: choose what goes (사진 · 도면 위치 · 글), then the share sheet. The choice is remembered.
-function shareOne(it) {
+// 공유 — one photo from the viewer or several picked on the day page, the same dialog: choose what goes
+// (사진 · 도면 위치 · 글), then the share sheet. Files go in order, each photo followed by its 도면 위치.
+// The choice is remembered. With several, the message has one numbered block per photo, and 메일용 25MB씩 can split.
+const shareOne = (it) => shareSet([it]);
+function sendTextOf(list) {
+  if (list.length === 1) return sendText(list[0]);
+  const blocks = list.map((it, i) => [i + 1, sendText(it)]).filter(([, t]) => t);
+  return blocks.map(([n, t]) => (blocks.length > 1 ? `${n}. ${t}` : t)).join('\n\n');
+}
+function shareSet(list) {
+  list = list.filter((i) => i && !i.draft).sort((a, b) => a.ts - b.ts);
+  if (!list.length) return Promise.resolve();
+  const one = list.length === 1, nm = uniqueNames(list);
   const parts = { photo: true, plan: true, text: true, ...(S.settings.shareParts || {}) };
-  const canPlan = !!(it.pin && S.floors.some((f) => f.key === it.floor));
-  let photo = V.item && V.item.id === it.id && V.out ? V.out : null, plan = null, planFail = false, open = true;
+  const located = list.filter((it) => it.pin && S.floors.some((f) => f.key === it.floor));
+  const canPlan = located.length > 0;
+  const photos = new Map(), plans = new Map(), failed = new Set();
+  if (one && V.item && V.item.id === list[0].id && V.out) photos.set(list[0].id, V.out);
+  let open = true, sentIds = new Set(), sentN = 0;
   const urls = [];
   return openDialog((box, close) => {
-    const info = el('p', { class: 'muted' }, '');
-    const txt = el('textarea', { class: 'send-text', rows: 3, placeholder: '같이 보낼 글' });
-    txt.value = sendText(it);
+    const info = el('p', { class: 'muted' }, ''), note = el('p', { class: 'pre send-note' }, '');
+    const txt = el('textarea', { class: 'send-text', rows: one ? 3 : 4, placeholder: '같이 보낼 글' });
+    txt.value = sendTextOf(list);
     const go = el('button', { class: 'btn primary', disabled: true }, '보내기');
-    const pvPhoto = el('img', { alt: '사진' }), pvPlan = el('img', { alt: '도면 위치' }), prev = el('div', { class: 'send-prev' }, pvPhoto, pvPlan);
-    const on = (k) => !!parts[k] && (k !== 'plan' || (canPlan && !planFail)) && (k !== 'text' || !!txt.value.trim());
-    const keys = [['photo', it.kind === 'video' ? '영상' : '사진'], ['plan', '도면 위치'], ['text', '글']].map(([k, l]) => el('button', {
+    const prev = el('div', { class: 'send-prev' + (one ? '' : ' strip') });
+    const on = (k) => !!parts[k] && (k !== 'plan' || (canPlan && located.some((it) => !failed.has(it.id)))) && (k !== 'text' || !!txt.value.trim());
+    const keys = [['photo', one && list[0].kind === 'video' ? '영상' : '사진'], ['plan', '도면 위치'], ['text', '글']].map(([k, l]) => el('button', {
       'data-k': k, disabled: k === 'plan' && !canPlan ? '' : null,
       onclick: () => { parts[k] = !parts[k]; S.settings.shareParts = { ...parts }; saveSettings(); paint(); },
     }, l));
+    // what goes, in order, still to send
+    const filesNow = () => {
+      const out = [];
+      for (const it of list) {
+        if (sentIds.has(it.id)) continue;
+        const ph = photos.get(it.id), pl = plans.get(it.id), base = nm.get(it.id) || nameOf(it);
+        if (on('photo') && ph) out.push({ id: it.id, blob: ph, name: base, mime: it.mime, ts: it.ts, photo: true, kind: it.kind });
+        if (on('plan') && pl) out.push({ id: it.id, blob: pl, name: base.replace(/\.[^.]+$/, '') + '_위치.jpg', mime: 'image/jpeg', ts: it.ts + 1000 });
+      }
+      return out;
+    };
+    let shown = '';
+    const paintPrev = (files) => {
+      const key = files.map((f) => f.name).join('|');
+      if (key === shown) return;
+      shown = key;
+      urls.splice(0).forEach((u) => URL.revokeObjectURL(u));
+      const max = one ? 2 : 12, kids = [];
+      for (const f of files.slice(0, max)) {
+        if (f.kind === 'video') { kids.push(el('div', { class: 'send-vid' }, '영상')); continue; }
+        const u = URL.createObjectURL(f.blob);
+        urls.push(u);
+        kids.push(el('img', { src: u, alt: f.name }));
+      }
+      if (files.length > max) kids.push(el('div', { class: 'send-more' }, `+${files.length - max}`));
+      prev.replaceChildren(...kids);
+    };
     const paint = () => {
       keys.forEach((b) => b.setAttribute('aria-pressed', String(!!parts[b.dataset.k] && !(b.dataset.k === 'plan' && !canPlan))));
       txt.hidden = !parts.text;
-      pvPhoto.hidden = !(parts.photo && photo && it.kind === 'photo');
-      pvPlan.hidden = !(on('plan') && plan);
-      prev.hidden = pvPhoto.hidden && pvPlan.hidden;
-      const waiting = (on('photo') && !photo) || (on('plan') && !plan);
-      go.disabled = waiting || !(on('photo') || on('plan') || on('text'));
-      info.textContent = waiting ? '준비하는 중…' : parts.plan && canPlan && planFail ? '도면 그림을 만들지 못했어요.' : parts.plan && !canPlan ? '위치를 붙인 사진만 도면 위치를 보낼 수 있어요.' : '';
+      ai.hidden = !parts.text;
+      const left = list.filter((it) => !sentIds.has(it.id));
+      const waitPh = on('photo') && left.some((it) => !photos.has(it.id) && !failed.has('f' + it.id));
+      const waitPl = on('plan') && left.some((it) => located.includes(it) && !plans.has(it.id) && !failed.has(it.id));
+      const files = waitPh || waitPl ? [] : filesNow();
+      paintPrev(files);
+      prev.hidden = !files.length;
+      const sets = S.settings.mailFit && !one ? splitBySize(files) : [files];
+      go.textContent = sets.length > 1 || sentN ? `보내기 ${sentN + 1}/${sentN + sets.length}` : '보내기';
+      go.disabled = waitPh || waitPl || !(files.length || on('text'));
+      const done = list.filter((it) => photos.has(it.id) || failed.has('f' + it.id)).length + located.filter((it) => plans.has(it.id) || failed.has(it.id)).length;
+      const lost = located.filter((it) => failed.has(it.id)).length;
+      info.textContent = waitPh || waitPl ? `준비하는 중… ${done}/${list.length + (parts.plan ? located.length : 0)}`
+        : parts.plan && canPlan && lost ? `도면 그림 ${lost}장을 만들지 못했어요.`
+        : parts.plan && !canPlan ? '위치를 붙인 사진만 도면 위치를 보낼 수 있어요.'
+        : parts.plan && located.length < left.length && !one ? `위치 없는 사진 ${left.length - located.length}장은 도면 위치 없이 가요.` : '';
       info.hidden = !info.textContent;
-    };
-    const show = (img, blob) => { const u = URL.createObjectURL(blob); urls.push(u); img.src = u; };
-    (async () => {
-      if (!photo) {
-        const f = await db.get('files', it.id).catch(() => null);
-        if (f && f.blob) photo = await shareBlob(it, f.blob).catch(() => f.blob);
-      }
-      if (!open) return;
-      if (photo && it.kind === 'photo') show(pvPhoto, photo);
-      paint();
-    })();
-    if (canPlan) {
-      locationPicture(it).then((b) => { plan = b; planFail = !b; }, (e) => { planFail = true; console.warn('도면 위치 그림', e && e.stack || e); }).then(() => { if (!open) return; if (plan) show(pvPlan, plan); paint(); });
-    }
-    txt.oninput = paint;
-    go.onclick = () => {
-      const files = [], base = names().get(it.id) || it.id;
-      if (on('photo') && photo) files.push({ blob: photo, name: nameOf(it), mime: it.mime, ts: it.ts });
-      if (on('plan') && plan) files.push({ blob: plan, name: `${base}_위치.jpg`, mime: 'image/jpeg', ts: it.ts + 1000 });
-      const text = on('text') ? txt.value.trim() : '';
-      shareFiles(files, text).then(async (r) => {
-        if (r === 'unsupported') { // a computer: the files are downloaded, the text is copied
-          for (const f of files) await shareOrDownload(f.blob, f.name, f.ts);
-          if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
-          r = files.length || text ? 'shared' : r;
-        }
-        if (r === 'shared') { if (files.some((f) => f.blob === photo)) markShared([it.id]); close(); }
-      });
+      if (!one) {
+        const size = files.reduce((t, x) => t + x.blob.size, 0);
+        note.textContent = files.length ? `${files.length}개 · ${fmtBytes(size)}` + (sets.length > 1 ? ` · 메일 한 통에 25MB까지라 ${sets.length}번으로 나눠요.` : '') : '';
+        note.hidden = !note.textContent;
+      } else note.hidden = true;
     };
     const ai = aiRow(txt, 'message', () => paint());
-    const paintAi = () => { ai.hidden = !parts.text; };
-    keys.forEach((b) => b.addEventListener('click', paintAi));
-    paintAi();
-    box.append(el('h3', {}, '보내기'), el('div', { class: 'seg send-parts' }, ...keys), prev, txt, ai, info,
+    txt.oninput = paint;
+    (async () => {
+      for (const it of list) {
+        if (!open) return;
+        if (!photos.has(it.id)) {
+          const f = await db.get('files', it.id).catch(() => null);
+          if (f && f.blob) photos.set(it.id, await shareBlob(it, f.blob).catch(() => f.blob)); else failed.add('f' + it.id);
+        }
+        if (open) paint();
+      }
+    })();
+    (async () => {
+      for (const it of located) {
+        if (!open) return;
+        try { const b = await locationPicture(it); if (b) plans.set(it.id, b); else failed.add(it.id); } catch (e) { failed.add(it.id); console.warn('도면 위치 그림', e && e.stack || e); }
+        if (open) paint();
+      }
+    })();
+    go.onclick = () => {
+      const files = filesNow(), sets = S.settings.mailFit && !one ? splitBySize(files) : [files], part = sets[0] || [];
+      const text = on('text') && !sentN ? txt.value.trim() : '';
+      shareFiles(part, text).then(async (r) => {
+        if (r === 'unsupported') { // a computer: the files are downloaded, the text is copied
+          for (const f of part) await shareOrDownload(f.blob, f.name, f.ts);
+          if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+          r = part.length || text ? 'shared' : r;
+        }
+        if (r !== 'shared') return;
+        const ids = [...new Set(part.filter((f) => f.photo).map((f) => f.id))];
+        if (ids.length) markShared(ids);
+        if (sets.length > 1) { part.forEach((f) => sentIds.add(f.id)); sentN++; shown = ''; paint(); return; }
+        if (!one) toast(`${list.length}장을 보냈어요`);
+        close();
+      });
+    };
+    box.append(el('h3', {}, one ? '보내기' : `보내기 · ${list.length}장`), el('div', { class: 'seg send-parts' }, ...keys), prev, txt, ai,
+      one ? null : mailSeg(() => { shown = ''; paint(); }), note, info,
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close() }, '닫기'), go));
     paint();
-  }).then(() => { open = false; urls.forEach((u) => URL.revokeObjectURL(u)); });
+  }, { dismiss: one }).then(() => { open = false; urls.forEach((u) => URL.revokeObjectURL(u)); });
 }
 
 // ================================================================ days tab

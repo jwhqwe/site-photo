@@ -403,3 +403,9 @@ h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .ai-row { display: flex; gap: 8px; margin: 8px 0 0; }
 .ai-row[hidden] { display: none; }
 .ai-row .ai-go { border-color: var(--ink); }
+
+/* 보내기 with several: a row of what goes */
+.send-prev.strip { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
+.send-prev.strip img, .send-prev.strip .send-vid, .send-prev.strip .send-more { flex: none; height: 84px; max-width: none; width: auto; }
+.send-prev .send-vid, .send-prev .send-more { width: 84px; height: 84px; display: grid; place-items: center; background: var(--chip); border: 1.5px solid var(--edge); font-weight: 800; color: var(--ink-2); }
+.send-note[hidden] { display: none; }
