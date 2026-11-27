@@ -1,19 +1,19 @@
 // 현장 사진 — app logic. Drawings, photos and records live only in this phone's storage (IndexedDB).
 import {
   $, $$, el, uid, dayOf, today, yymmdd, timeOf, dayLabel, addDays, extOf, computeNames, csv,
-  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, turnJpeg, turnMovie, shotTime, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
+  makeZip, readZip, imageThumb, videoThumb, toast, shareOrDownload, fmtBytes, withExif, canvasBlob, turnJpeg, turnMovie, shotTime, ownCopy, headOf, isZipHead, withMovieTime, MEMO, grayOf, memoCorner, burnMemo,
 } from './util.js';
 import * as db from './db.js';
 import { PlanView, svg, ptsAttr, centroid, polyDist } from './plan.js';
 import { Camera, nativeCapture, sensors, headingToPlan, calibFor, bearingOf, FAN_HALF } from './camera.js';
 import { openScan, canvasFromBlob, findPaper } from './scan.js';
-import { photoSheetPdf } from './report.js';
+import { ledgerXlsx, ledgerPdf, ledgerSlots } from './ledger.js';
 import { loadTodos, renderTodos, bindTodos, todosForBackup, restoreTodos, routinesForBackup, restoreRoutines, updateTodoBadge, showTodoToday } from './todo.js';
 import { openDialog, confirmBox, alertBox, promptText, choose, offerFile, busy, pickFiles } from './ui.js';
 import { askAI, aiErrorText } from './ai.js';
 
-const APP_VERSION = '1.17.0';
-const APP_DATE = '2026-11-23';
+const APP_VERSION = '1.18.0';
+const APP_DATE = '2026-11-27';
 
 // Start screen: shows the running version (the one this code is) long enough to read, then fades out. A tap skips it.
 // The gauge fills 0 → 100 %: it follows the start-up steps, never runs ahead of them, and is paced so it reaches 100 %
@@ -792,40 +792,92 @@ async function finishRecording() {
   await onCaptured({ blob, thumb: t.thumb, w: t.w, h: t.h, mime: blob.type || 'video/mp4', kind: 'video', lens: REC.lens, withPhotos: REC.photos.splice(0) });
 }
 
-// 사진대지: chosen photos on A4 pages with 일시·위치·부재·내용, as a PDF
-function reportRows(it) {
+// 사진대지: chosen photos, two a page, each with its 위치도 and 일시·위치·부재·내용·비고, 세로 or 가로,
+// as an Excel workbook to fill in (공사명·작성일 typed once) or a PDF to send as it is
+function ledgerFields(it) {
   const d = new Date(it.ts), p2 = (n) => String(n).padStart(2, '0');
-  const where = it.tbm ? 'TBM' : it.doc ? '문서' : seriesOf(it) ? seriesOf(it).base : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid].filter(Boolean).join(' · ') || '위치 없음';
-  const what = it.tbm || it.doc ? '' : it.noMember ? '부재 없음' : memberText(it);
-  const note = [it.issue ? issueText(it) : '', it.fixOf ? '조치 후' : '', it.memo || ''].filter(Boolean).join(' · ');
-  return [['일시', `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())} ${timeOf(it.ts)}`], ['위치', where], ['부재', what || '-'], ['내용', note || '-']];
+  const where = it.tbm ? 'TBM' : it.doc ? '문서' : seriesOf(it) ? seriesOf(it).base
+    : [floorLabel(it.floor), it.room ? it.room.name : '', it.grid].filter(Boolean).join(' · ') || '-';
+  const member = it.tbm || it.doc ? '-' : it.noMember ? (it.area ? '범위 표시' : '-') : memberText(it) || '-';
+  const note = [it.issue ? issueText(it) : '', it.fixOf ? '조치 후 사진' : ''].filter(Boolean).join(' · ');
+  return {
+    time: `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${timeOf(it.ts)}`, where, member, memo: it.memo || '', note,
+    noteColor: it.issue ? (it.issue.status === 'open' ? 'E3000F' : '1FA463') : null,
+  };
+}
+// a picture fitted into w x h px (at 2x for print), upright, as a JPEG
+async function fitJpeg(src, w, h, q = 0.86) {
+  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height, k = Math.min(1, (w * 2) / sw, (h * 2) / sh);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sw * k)); c.height = Math.max(1, Math.round(sh * k));
+  const g = c.getContext('2d', { alpha: false });
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(src, 0, 0, c.width, c.height);
+  const blob = await canvasBlob(c, 'image/jpeg', q);
+  const out = { blob, w: c.width, h: c.height };
+  c.width = c.height = 1;
+  return out;
 }
 async function makeReport(list) {
   list = list.filter((i) => i && i.kind === 'photo' && !i.draft).sort((a, b) => a.ts - b.ts);
   if (!list.length) { toast('사진을 골라 주세요 (영상은 빠져요)'); return; }
-  let per = 2, title = '공사 사진대지';
+  const set = S.settings;
+  let layout = set.ledgerLayout === 'landscape' ? 'landscape' : 'portrait', kind = set.ledgerKind === 'pdf' ? 'pdf' : 'xlsx';
   const go = await openDialog((box, close) => {
-    const t = el('input', { value: title, 'aria-label': '제목' });
-    const seg = el('div', { class: 'seg' }, ...[2, 3].map((n) => el('button', {
-      'aria-pressed': String(per === n),
-      onclick: () => { per = n; [...seg.children].forEach((b, i) => b.setAttribute('aria-pressed', String(i + 2 === per))); },
-    }, `한 쪽에 ${n}장`)));
+    const t = el('input', { value: set.ledgerTitle || '', placeholder: '공사명 (비워 두면 엑셀에서 적어요)', 'aria-label': '공사명' });
+    const seg = (opts, get, put) => {
+      const bs = opts.map(([v, l]) => el('button', { 'aria-pressed': String(get() === v), onclick: () => { put(v); bs.forEach((x, i) => x.setAttribute('aria-pressed', String(opts[i][0] === get()))); } }, l));
+      return el('div', { class: 'seg' }, ...bs);
+    };
     box.append(el('h3', {}, `사진대지 · 사진 ${list.length}장`),
-      el('p', {}, 'A4에 사진과 일시·위치·부재·내용 칸을 넣어 PDF로 만들어요. 위치·부재는 붙인 기록에서, 내용은 이슈와 메모에서 가져와요.'),
-      t, seg,
+      el('p', {}, `한 쪽에 사진 2장, 사진마다 위치도와 일시·위치·부재·내용·비고가 들어가요. ${Math.ceil(list.length / 2)}쪽이에요.`),
+      seg([['portrait', '세로'], ['landscape', '가로']], () => layout, (v) => { layout = v; }),
+      seg([['xlsx', '엑셀 (고쳐 쓰기)'], ['pdf', 'PDF (바로 보내기)']], () => kind, (v) => { kind = v; }),
+      t,
       el('div', { class: 'd-actions' }, el('button', { class: 'btn', onclick: () => close(false) }, '닫기'),
-        el('button', { class: 'btn primary', onclick: () => { title = t.value.trim() || title; close(true); } }, '만들기')));
+        el('button', { class: 'btn primary', onclick: () => { set.ledgerTitle = t.value.trim(); close(true); } }, '만들기')));
   });
   if (!go) return;
+  set.ledgerLayout = layout; set.ledgerKind = kind;
+  saveSettings();
   const b = busy('사진대지 만드는 중…');
   try {
-    const entries = [];
-    for (const it of list) { const f = await db.get('files', it.id); if (f && f.blob) entries.push({ blob: f.blob, rows: reportRows(it) }); }
-    const pdf = await photoSheetPdf(entries, { title, perPage: per, onProgress: (i, n) => b.set(`사진대지 만드는 중… ${i}/${n}쪽`) });
+    const slots = ledgerSlots(layout), entries = [];
+    for (const it of list) {
+      b.set(`사진 준비하는 중… ${entries.length + 1}/${list.length}`);
+      const f = await db.get('files', it.id).catch(() => null);
+      if (!f || !f.blob) continue;
+      let photo = null;
+      const url = URL.createObjectURL(f.blob);
+      try {
+        const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+        photo = await fitJpeg(im, slots.photo[0], slots.photo[1]);
+      } catch (e) { photo = null; } finally { URL.revokeObjectURL(url); }
+      let map = null;
+      if (it.pin && !it.tbm && !it.doc) {
+        try {
+          const [mw, mh] = slots.map, c = await placeCanvas(it, Math.round(mw * 2), Math.round(mh * 2), { key: false, minW: 110, mark: 0.9 });
+          if (c) { map = { blob: await canvasBlob(c, 'image/jpeg', 0.86), w: c.width, h: c.height }; c.width = c.height = 1; }
+        } catch (e) { console.warn('위치도', e && e.stack || e); }
+      }
+      entries.push({ photo, map, fields: ledgerFields(it), noMap: it.tbm ? '위치 없음 (TBM)' : it.doc ? '위치 없음 (문서)' : '위치 없음' });
+    }
+    const d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+    const opts = { title: set.ledgerTitle || '', date: `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` };
+    const pages = Math.ceil(entries.length / 2), base = `사진대지_${yymmdd(list[0].day)}_${layout === 'landscape' ? '가로' : '세로'}`;
+    let file, name;
+    if (kind === 'xlsx') {
+      b.set('엑셀 만드는 중…');
+      file = await ledgerXlsx(layout, entries, opts);
+      name = base + '.xlsx';
+    } else {
+      file = await ledgerPdf(layout, entries, opts, (i, n) => b.set(`PDF 만드는 중… ${i}/${n}쪽`));
+      name = base + '.pdf';
+    }
     b.done();
-    await offerFile(pdf, `사진대지_${yymmdd(list[0].day)}.pdf`, '사진대지 준비 완료',
-      `${Math.ceil(entries.length / per)}쪽 · ${fmtBytes(pdf.size)}
-"파일에 저장"하거나 메신저·메일로 보내세요.`);
+    await offerFile(file, name, '사진대지 준비 완료', `${pages}쪽 · ${fmtBytes(file.size)}\n` +
+      (kind === 'xlsx' ? '엑셀에서 공사명·작성일을 1쪽에 적으면 다른 쪽에도 같이 들어가요. 내용·비고 칸은 고쳐 써도 돼요.' : '"파일에 저장"하거나 메신저·메일로 보내세요.'));
   } catch (e) {
     b.done();
     alertBox('사진대지를 만들지 못했어요', (e && e.message) || String(e));
@@ -1898,12 +1950,13 @@ function halve(src, w, h) {
   g.drawImage(cur, 0, 0, w, h);
   return out;
 }
-async function locationPicture(it) {
+// the drawing around a photo's spot as a W x H canvas (spot, fan, members or box; the whole-floor key when asked),
+// with CAP px left white under it. minW: the least width of drawing shown, in plan points (280 ≈ 80 m).
+async function placeCanvas(it, W, H, { CAP = 0, key = true, minW = 280, mark = 0 } = {}) {
   const fl = it.pin ? await getFloor(it.floor) : null;
   if (!fl) return null;
-  const W = 1200, H = 900, CAP = 132;
   const r = reachOf(it), cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
-  const bw = Math.max((r[2] - r[0]) * 1.8, ((r[3] - r[1]) * 1.8 * W) / H, 280), bh = (bw * H) / W;
+  const bw = Math.max((r[2] - r[0]) * 1.8, ((r[3] - r[1]) * 1.8 * W) / H, minW, (minW * 0.75 * W) / H), bh = (bw * H) / W;
   const box = [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2];
   const base = await PV.snapshot(fl, box, W, H);
   const c = document.createElement('canvas');
@@ -1912,14 +1965,14 @@ async function locationPicture(it) {
   g.fillStyle = '#fff';
   g.fillRect(0, 0, W, H + CAP);
   g.drawImage(base, 0, 0);
-  const k = W / bw, X = (q) => (q[0] - box[0]) * k, Y = (q) => (q[1] - box[1]) * k;
+  const k = W / bw, X = (q) => (q[0] - box[0]) * k, Y = (q) => (q[1] - box[1]) * k, u = mark || Math.max(0.6, Math.min(W, H) / 900);
   g.save();
   g.beginPath(); g.rect(0, 0, W, H); g.clip();
   g.lineJoin = 'round';
   if (!it.noMember) {
     for (const ref of it.members || []) {
       const m = memberOf(fl, ref);
-      g.fillStyle = 'rgba(245,196,0,.8)'; g.strokeStyle = '#111'; g.lineWidth = 3;
+      g.fillStyle = 'rgba(245,196,0,.8)'; g.strokeStyle = '#111'; g.lineWidth = 3 * u;
       if (m) {
         g.beginPath();
         m.pts.forEach((q, i) => (i ? g.lineTo(X(q), Y(q)) : g.moveTo(X(q), Y(q))));
@@ -1929,7 +1982,7 @@ async function locationPicture(it) {
   }
   if (it.area) {
     const a = it.area;
-    g.fillStyle = 'rgba(255,90,31,.2)'; g.strokeStyle = '#ff5a1f'; g.lineWidth = 5;
+    g.fillStyle = 'rgba(255,90,31,.2)'; g.strokeStyle = '#ff5a1f'; g.lineWidth = 5 * u;
     g.fillRect(X(a), Y(a), (a[2] - a[0]) * k, (a[3] - a[1]) * k);
     g.strokeRect(X(a), Y(a), (a[2] - a[0]) * k, (a[3] - a[1]) * k);
   }
@@ -1939,24 +1992,24 @@ async function locationPicture(it) {
     for (const q of fanPoints(fl, it.pin, fan)) g.lineTo(X(q), Y(q));
     g.closePath();
     g.fillStyle = 'rgba(46,107,230,.22)'; g.fill();
-    g.strokeStyle = '#2e6be6'; g.lineWidth = 3; g.stroke();
+    g.strokeStyle = '#2e6be6'; g.lineWidth = 3 * u; g.stroke();
   }
   if (t && Math.hypot(t[0] - it.pin[0], t[1] - it.pin[1]) > FAN_R) {
-    g.setLineDash([14, 10]); g.strokeStyle = '#2e6be6'; g.lineWidth = 4;
+    g.setLineDash([14 * u, 10 * u]); g.strokeStyle = '#2e6be6'; g.lineWidth = 4 * u;
     g.beginPath(); g.moveTo(px, py); g.lineTo(X(t), Y(t)); g.stroke();
     g.setLineDash([]);
   }
   // the spot: orange with a halo, so it is found at a glance on a black-and-white drawing
-  g.beginPath(); g.arc(px, py, 46, 0, Math.PI * 2);
-  g.fillStyle = 'rgba(255,90,31,.16)'; g.fill(); g.strokeStyle = '#ff5a1f'; g.lineWidth = 3; g.stroke();
-  g.beginPath(); g.arc(px, py, 16, 0, Math.PI * 2);
-  g.fillStyle = '#ff5a1f'; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 5; g.stroke();
-  g.beginPath(); g.arc(px, py, 19, 0, Math.PI * 2);
-  g.strokeStyle = '#111'; g.lineWidth = 2; g.stroke();
+  g.beginPath(); g.arc(px, py, 46 * u, 0, Math.PI * 2);
+  g.fillStyle = 'rgba(255,90,31,.16)'; g.fill(); g.strokeStyle = '#ff5a1f'; g.lineWidth = 3 * u; g.stroke();
+  g.beginPath(); g.arc(px, py, 16 * u, 0, Math.PI * 2);
+  g.fillStyle = '#ff5a1f'; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 5 * u; g.stroke();
+  g.beginPath(); g.arc(px, py, 19 * u, 0, Math.PI * 2);
+  g.strokeStyle = '#111'; g.lineWidth = 2 * u; g.stroke();
   // the whole floor, small, with this part marked: drawn from the vector drawing at its own size (a scaled-down
   // picture of thin lines breaks up), the base picture stepped down by halves when there is no PDF
   const fw = fl.imgW / fl.k, fh = fl.imgH / fl.k;
-  if (bw < fw * 0.6) {
+  if (key && bw < fw * 0.6) {
     const s = Math.min(340 / fw, 340 / fh), iw = Math.round(fw * s), ih = Math.round(fh * s), ix = 18, iy = 18;
     const key = await keyMap(fl, iw, ih);
     if (key) {
@@ -1971,6 +2024,13 @@ async function locationPicture(it) {
     }
   }
   g.restore();
+  return c;
+}
+async function locationPicture(it) {
+  const W = 1200, H = 900, CAP = 132;
+  const c = await placeCanvas(it, W, H, { CAP });
+  if (!c) return null;
+  const g = c.getContext('2d');
   g.fillStyle = '#111';
   g.fillRect(0, H, W, 4);
   const fam = 'Pretendard, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif';

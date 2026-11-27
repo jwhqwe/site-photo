@@ -10,7 +10,7 @@
 
 ## 구조
 - 배포: `gh-pages` 브랜치 루트를 GitHub Pages가 그대로 서빙한다. 빌드 단계는 없다.
-- `index.html`, `app.css`, `js/main.js`(화면·흐름), `js/plan.js`(도면 보기·확대 시 PDF 벡터 재렌더링), `js/camera.js`(앱 카메라·기본 카메라·나침반), `js/db.js`(IndexedDB), `js/util.js`(이름 규칙·CSV·ZIP), `js/ui.js`(대화상자), `js/ai.js`(AI로 다듬기), `vendor/`(pdf.js 3.11.174).
+- `index.html`, `app.css`, `js/main.js`(화면·흐름), `js/plan.js`(도면 보기·확대 시 PDF 벡터 재렌더링), `js/camera.js`(앱 카메라·기본 카메라·나침반), `js/db.js`(IndexedDB), `js/util.js`(이름 규칙·CSV·ZIP), `js/ui.js`(대화상자), `js/ai.js`(AI로 다듬기), `js/ledger.js`(사진대지 엑셀·PDF), `vendor/`(pdf.js 3.11.174).
 - 코드를 바꾸면 `sw.js`의 `VERSION` 값을 바꿔야 폰에 새 버전이 들어간다.
 - 도면은 앱의 "도면 파일 가져오기"로 폰에서 넣는 패키지(format `fieldphoto-drawings`)에서 온다.
 
